@@ -1,0 +1,3484 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>כתבי יד ר׳ ראובן צרפתי</title>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="./alignment-engine.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Assistant:wght@300;400;500;600;700&family=Frank+Ruhl+Libre:wght@400;700&display=swap');
+        *, *::before, *::after { box-sizing: border-box; }
+        html, body { margin: 0; padding: 0; font-family: 'Assistant', sans-serif; }
+        .heb { font-family: 'Frank Ruhl Libre', serif; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .spin-ring { width:36px;height:36px;border:3px solid #e2e8f0;border-top-color:#4f46e5;border-radius:50%;animation:spin .8s linear infinite; }
+        /* Custom scrollbar */
+        ::-webkit-scrollbar { width:6px; height:6px; }
+        ::-webkit-scrollbar-track { background:#f1f5f9; }
+        ::-webkit-scrollbar-thumb { background:#cbd5e1; border-radius:3px; }
+    </style>
+</head>
+<body class="bg-slate-100">
+
+<div id="root">
+    <div style="height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px">
+        <div class="spin-ring"></div>
+        <p style="color:#64748b;font-family:Assistant,sans-serif;font-size:15px">טוען נתונים...</p>
+    </div>
+</div>
+
+<script type="text/babel">
+const { useState, useMemo, useEffect, useRef } = React;
+
+/* ═══════════════════════════════════════════════════════════
+   SHEET IDs  (from Share links)
+   MSS-Sarfatti  : 1aD77sj5VrMVMx_fNw0lXY7ljbEUQjpASL-Hmz9mGlK8
+   Igeret Sipurim: 1Qc09m0bK0EJiWnQUZe4k9TfiCPz-NISHqswfo_P4sAc
+═══════════════════════════════════════════════════════════ */
+const MSS_ID    = "1aD77sj5VrMVMx_fNw0lXY7ljbEUQjpASL-Hmz9mGlK8";
+const IGERET_ID = "1Qc09m0bK0EJiWnQUZe4k9TfiCPz-NISHqswfo_P4sAc";
+
+/* ═══════════════════════════════════════════════════════════
+   JSONP FETCH  — injects a <script> tag, so no CORS needed.
+   Works from file://, http://, or any origin.
+═══════════════════════════════════════════════════════════ */
+function fetchGviz(sheetId, sheetParam, cacheTag = '') {
+    return new Promise((resolve, reject) => {
+        const cb    = '_gviz_' + Date.now() + '_' + Math.floor(Math.random() * 1e9);
+        const el    = document.createElement('script');
+        const timer = setTimeout(() => { cleanup(); reject(new Error('timeout (20s)')); }, 20000);
+        const bust  = cacheTag || (Date.now() + '_' + Math.floor(Math.random() * 1e9));
+
+        function cleanup() {
+            clearTimeout(timer);
+            delete window[cb];
+            if (el.parentNode) document.head.removeChild(el);
+        }
+
+        window[cb] = function (resp) {
+            cleanup();
+            if (!resp || resp.status === 'error') {
+                const msg = resp?.errors?.[0]?.detailed_message
+                    || resp?.errors?.[0]?.message
+                    || 'גיליון לא נגיש – בדוק שיתוף ציבורי';
+                reject(new Error(msg));
+                return;
+            }
+            resolve(resp);
+        };
+
+        el.onerror = () => { cleanup(); reject(new Error('JSONP script error')); };
+        // cache-busting ensures each reload pulls fresh data from the sheet
+        el.src = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=responseHandler:${cb}&${sheetParam}&_ts=${encodeURIComponent(bust)}`;
+        document.head.appendChild(el);
+    });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   HELPERS
+═══════════════════════════════════════════════════════════ */
+// gviz column labels sometimes contain "#ERROR!" if the header cell
+// had a formula error in the sheet. Strip that noise.
+const cleanLabel = s => (s || '').replace(/\s*#ERROR![\s#ERROR!]*/ig, '').trim();
+
+const cellVal = (row, idx) => row?.c?.[idx]?.v ?? null;
+const cellStr = (row, idx) => {
+    const cell = row?.c?.[idx];
+    if (!cell) return '';
+    const v = cell.v == null ? '' : String(cell.v).trim();
+    const f = cell.f == null ? '' : String(cell.f).trim();
+    if (/^#ERROR!?$/i.test(v)) {
+        return /^#ERROR!?$/i.test(f) ? '' : f;
+    }
+    return (v || f || '').trim();
+};
+const cellNum = (row, idx) => {
+    const v = cellVal(row, idx);
+    if (v === null) return null;
+    const n = typeof v === 'number' ? v : Number(v);
+    return isNaN(n) ? null : n;
+};
+
+const msKey  = (lib, num) => `${lib}::${num}`;
+const shortLib = lib => {
+    // "Amsterdam, Ets Haim Library" → "Ets Haim Library"
+    const parts = lib.split(',').map(s => s.trim());
+    return parts[parts.length - 1] || lib;
+};
+const placeFromLibrary = lib => {
+    const parts = (lib || '').split(',').map(s => s.trim()).filter(Boolean);
+    return parts[0] || '';
+};
+const normalizeMsPart = s => String(s || '')
+    .toLowerCase()
+    .replace(/[\u0591-\u05c7]/g, '')
+    .replace(/['"`.,;:!?()[\]{}<>\-_/\\]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+const normalizedMsKey = (lib, num) => `${normalizeMsPart(lib)}::${normalizeMsPart(num)}`;
+const extractYearFromString = txt => {
+    const s = String(txt || '');
+    if (!s.trim()) return null;
+    const re = /\b(\d{3,4})\b/g;
+    let m;
+    while ((m = re.exec(s))) {
+        const y = Number(m[1]);
+        if (y < 500 || y > 2100) continue;
+        const left = s.slice(Math.max(0, m.index - 8), m.index).toLowerCase();
+        if (/ms\.?\s*$|cod\.?\s*$|^or\.?\s*$/i.test(left.trim())) continue;
+        return y;
+    }
+    return null;
+};
+const yearSortValue = y => {
+    if (y == null) return 9999;
+    const s = String(y).trim();
+    if (!s) return 9999;
+    const direct = Number(s);
+    if (!isNaN(direct) && direct > 0) return direct;
+    const parsed = extractYearFromString(s);
+    return parsed == null ? 9999 : parsed;
+};
+const yearFromMeta = meta => {
+    if (!meta) return null;
+    const entries = Object.entries(meta);
+    // Prefer explicit date/year-related fields before any heuristic fallback.
+    const explicit = entries.filter(([k]) => /(year|date|century|שנה|תאריך|מאה|זמן|תקופה)/i.test(k));
+    for (const [, val] of explicit) {
+        const y = extractYearFromString(val);
+        if (y != null) return y;
+    }
+    for (const [k, val] of entries) {
+        if (!/(שנה|תאריך|נכתב|נעתק|dated|copied|written)/i.test(`${k} ${val}`)) continue;
+        const y = extractYearFromString(val);
+        if (y != null) return y;
+    }
+    return null;
+};
+const scriptTypeFromMeta = meta => {
+    if (!meta) return '';
+    const entries = Object.entries(meta);
+    const explicit = entries.find(([k]) => /(script|hand|type of writing|כתיבה|סוג.*כתב|סוג.*כתיבה|כתב)/i.test(k));
+    if (explicit && String(explicit[1]).trim()) return String(explicit[1]).trim();
+    const joined = entries.map(([k, v]) => `${k}: ${v}`).join(' | ');
+    const hints = [
+        'ספרדי', 'אשכנזי', 'מזרחי', 'תימני', 'איטלקי', 'רבני', 'מרובע',
+        'sefardi', 'ashkenazi', 'oriental', 'yemeni', 'italian', 'rabbinic', 'square'
+    ];
+    const hit = hints.find(h => new RegExp(h, 'i').test(joined));
+    if (hit) {
+        const found = joined.match(new RegExp(`([^|]{0,20}${hit}[^|]{0,20})`, 'i'));
+        return (found?.[1] || hit).trim();
+    }
+    return '';
+};
+const centuryFromMeta = meta => {
+    if (!meta) return '';
+    const entries = Object.entries(meta);
+    const explicit = entries.find(([k]) => /(century|מאה|תקופה)/i.test(k));
+    if (explicit && String(explicit[1]).trim()) return String(explicit[1]).trim();
+    for (const [, v] of entries) {
+        const s = String(v || '').trim();
+        if (!s) continue;
+        if (/(^|\s)(?:המאה\s+)?\d{1,2}\s*(?:לספירה|לפנה"ס|th|st|nd|rd)?\b/i.test(s)) return s;
+        if (/(century|מאה)/i.test(s)) return s;
+    }
+    return '';
+};
+const looksLikeScriptType = val => {
+    const s = String(val || '').trim();
+    if (!s) return false;
+    if (/^(?:x|\u2713|yes|true|1)$/i.test(s)) return false;
+    return /(כתב|כתיבה|ספרדי|אשכנזי|מזרחי|תימני|איטלקי|רבני|מרובע|script|hand|sefardi|ashkenazi|square|rabbinic|cursive)/i.test(s);
+};
+const looksLikeCentury = val => {
+    const s = String(val || '').trim();
+    if (!s) return false;
+    if (/^(?:x|\u2713|yes|true)$/i.test(s)) return false;
+    return /(century|מאה|תקופה)|(^\d{1,2}\s*(?:th|st|nd|rd)?$)/i.test(s);
+};
+const looksLikePlaceCell = val => {
+    const s = String(val || '').trim();
+    if (!s) return false;
+    if (/^(?:x|\u2713|yes|true|\d+)$/i.test(s)) return false;
+    return /[\u0590-\u05ffA-Za-z]/.test(s) && !looksLikeScriptType(s) && !looksLikeCentury(s);
+};
+
+/* ═══════════════════════════════════════════════════════════
+   PARSER 1: MSS-Sarfatti inventory sheet
+
+   Sheet structure (row 1 = header, gviz gives it as col labels):
+     Col A (0): Library name
+     Col B (1): MS number / shelfmark
+     Col C–K (2–10): Presence in 9 works.
+       Cell is non-null  → this MS contains that work
+       Cell is null      → absent
+   NOTE: The gviz label for Col A & B in this sheet is badly formed
+   (it contains concatenated library names) — we ignore those labels
+   and use fixed names.
+═══════════════════════════════════════════════════════════ */
+function parseMss(resp) {
+    if (!resp?.table) return { mssData: [], workNames: [], metaFields: [] };
+    const cols = resp.table.cols || [];
+    const rows = resp.table.rows || [];
+    const COL_D_SCRIPT = 3;
+    const COL_E_YEAR = 4;
+    const COL_F_CENTURY = 5;
+    const labelAt = idx => cleanLabel(cols[idx]?.label || '');
+    const findColByLabel = re => cols.findIndex((_, idx) => re.test(labelAt(idx)));
+    const scriptColByLabel = findColByLabel(/(^|\s)(script|hand|כתיבה|כתב)($|\s)/i);
+    const yearColByLabel = findColByLabel(/(^|\s)(year|date|שנה|תאריך|dated)($|\s)/i);
+    const centuryColByLabel = findColByLabel(/(^|\s)(century|מאה|תקופה)($|\s)/i);
+    const SCRIPT_COL = scriptColByLabel >= 0 ? scriptColByLabel : COL_D_SCRIPT;
+    const YEAR_COL = yearColByLabel >= 0 ? yearColByLabel : COL_E_YEAR;
+    const CENTURY_COL = centuryColByLabel >= 0 ? centuryColByLabel : COL_F_CENTURY;
+
+    // In sheet=mss, work columns are expected to be these nine named fields.
+    // We detect by label first; if not all are found, fallback to legacy fixed range.
+    const expectedWorks = [
+        { name: 'Leshon Elohut', re: /leshon\s+elohut/i },
+        { name: 'Student commentary', re: /student\s+commentary/i },
+        { name: 'CSP (110)', re: /csp\s*\(\s*110\s*\)/i },
+        { name: 'CSP (120)', re: /csp\s*\(\s*120\s*\)/i },
+        { name: 'Intro to 110 (no. 75)', re: /intro\s+to\s+110/i },
+        { name: 'Perush Zulati MSS', re: /perush\s+zulati/i },
+        { name: "Ma'arehket MSS", re: /ma.?arehket/i },
+        { name: 'Igeret Sipurim', re: /igeret\s+sipurim/i },
+        { name: 'Perush GP', re: /perush\s+gp/i },
+    ];
+
+    let workColDefs = expectedWorks
+        .map(w => {
+            const idx = findColByLabel(w.re);
+            return idx >= 0 ? { origIdx: idx, name: cleanLabel(cols[idx]?.label) || w.name } : null;
+        })
+        .filter(Boolean);
+
+    if (workColDefs.length !== expectedWorks.length) {
+        const WORK_START = 2;
+        const WORK_END = 10;
+        const HEB_ORD = ['א','ב','ג','ד','ה','ו','ז','ח','ט'];
+        workColDefs = cols.slice(WORK_START, WORK_END + 1).map((c, i) => ({
+            origIdx: WORK_START + i,
+            name: cleanLabel(c.label) || `חיבור ${HEB_ORD[i]}`,
+        }));
+    }
+
+    const workNames = workColDefs.map(c => c.name);
+    const metaStart = Math.max(...workColDefs.map(c => c.origIdx), 10) + 1;
+
+    // Biographical/metadata columns are everything after the work columns.
+    // Keep columns that have either a header or at least one non-empty value.
+    const metaColDefs = cols
+        .map((c, idx) => ({ origIdx: idx, name: cleanLabel(c.label) }))
+        .filter(c => c.origIdx >= metaStart)
+        .filter(c => c.name || rows.some(r => {
+            const v = cellVal(r, c.origIdx);
+            return v !== null && String(v).trim() !== '' && !/^#ERROR!?$/i.test(String(v).trim());
+        }))
+        .map((c, i) => ({ ...c, name: c.name || `שדה נוסף ${i + 1}` }));
+    const metaFields = metaColDefs.map(c => c.name);
+
+    // Detect shelfmark embedded in library cell: "City, LibraryName, Ms. Add. 505"
+    const shelfRe = /,\s*((?:Ms|Cod)\.\s+\S+(?:[\s.]\S*)*)\s*$/i;
+
+    const mssData = rows
+        .filter(r => cellVal(r, 0) !== null)
+        .map((r, i) => {
+            let library = cellStr(r, 0);
+            let number  = cellStr(r, 1);
+            let inlineShelfmarkNote = '';
+            const sm = library.match(shelfRe);
+            if (sm) {
+                number  = sm[1].trim() + (number ? ` / ${number}` : '');
+                library = library.slice(0, library.length - sm[0].length).trim();
+            }
+            // Split long explanatory parenthetical from shelfmark for cleaner display.
+            const noteMatch = number.match(/^(.+?)\s*\(([^)]+)\)\.?\s*$/);
+            if (noteMatch) {
+                number = noteMatch[1].trim();
+                inlineShelfmarkNote = noteMatch[2].trim();
+            }
+            // Use origIdx so presence is checked against the correct column.
+            // Keep cell payload so hovering a dot can reveal the exact source text.
+            const workPayload = {};
+            const works = workColDefs
+                .filter(c => {
+                    const raw = cellVal(r, c.origIdx);
+                    if (raw === null) return false;
+                    const txt = String(raw).trim();
+                    if (txt) workPayload[c.name] = txt;
+                    return true;
+                })
+                .map(c => c.name);
+
+            const meta = {};
+            metaColDefs.forEach(c => {
+                const raw = cellVal(r, c.origIdx);
+                if (raw === null) return;
+                const val = String(raw).trim();
+                if (!val || /^#ERROR!?$/i.test(val)) return;
+                meta[c.name] = val;
+            });
+            if (inlineShelfmarkNote) meta['הערת מדף'] = inlineShelfmarkNote;
+
+            // Strict source mapping with no heuristic fallbacks.
+            // Place is taken from the library city prefix for stability.
+            // Script / year / century are read directly from D/E/F.
+            const cleanSourceCell = idx => {
+                const v = cellStr(r, idx);
+                if (/^(?:x|\u2713|√|yes|true|1|v|●|•|\*)$/i.test(v)) return '';
+                return v;
+            };
+            const place = placeFromLibrary(library);
+            const scriptType = cleanSourceCell(SCRIPT_COL);
+            const year = cleanSourceCell(YEAR_COL);
+            const century = cleanSourceCell(CENTURY_COL);
+
+            return { id: i + 1, library, number, place, year, century, scriptType, works, workPayload, meta };
+        });
+
+    return { mssData, workNames, metaFields };
+}
+
+/* ═══════════════════════════════════════════════════════════
+   PARSER 2: Igeret Sipurim – Tab 1 (story order)
+
+   Col A (0): כתב יד (library)
+   Col B (1): MS number  [label is empty in gviz]
+   Col C (2): מספר סיפור אצל צרפתי  (canonical Sarfatti story number)
+   Col D (3): סדר בכתב היד           (position within *this* MS)
+   Col E (4): שם סיפור אצל צרפתי    (story name)
+   Col F (5): סיפור                  (opening/incipit)
+   Col G (6): עמוד בכתב יד           (folio)
+   Col H (7): הערה                   (note)
+═══════════════════════════════════════════════════════════ */
+function parseIgeret1(resp) {
+    if (!resp?.table?.rows) return [];
+    return resp.table.rows
+        .filter(r => cellVal(r, 0) !== null)
+        .map(r => {
+            const storyNameRaw = cellStr(r, 4);
+            const incipit      = cellStr(r, 5);
+            const fallbackName = incipit
+                ? incipit.replace(/\s+/g, ' ').trim().split(/[.:;!?]/)[0].slice(0, 60)
+                : '';
+            return {
+                library:      cellStr(r, 0),
+                number:       cellStr(r, 1),
+                sarfattiNum:  cellNum(r, 2),
+                msOrder:      cellNum(r, 3),
+                storyName:    storyNameRaw || fallbackName,
+                storyNameRaw,
+                incipit,
+                folio:        cellStr(r, 6),
+                note:         cellStr(r, 7),
+            };
+        });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   PARSER 3: Igeret Sipurim – Tab 2 (full texts)
+
+   All col labels are empty in gviz, but data is:
+   Col A (0): Library name
+   Col B (1): MS number
+   Col C (2): Story number (Sarfatti canonical)
+   Col D (3): Full story text
+═══════════════════════════════════════════════════════════ */
+function parseIgeret2(resp) {
+    const rows = resp?.table?.rows || [];
+    const out = [];
+    const droppedReasons = {
+        blankRow: 0,
+        missingManuscript: 0,
+        missingStoryNum: 0,
+        emptyText: 0,
+    };
+
+    rows.forEach((r, idx) => {
+        const library = cellStr(r, 0);
+        const number = cellStr(r, 1);
+        const storyNum = cellNum(r, 2);
+        const text = cellStr(r, 3);
+        const hasAny = [library, number, storyNum, text].some(v => v !== null && String(v).trim() !== '');
+
+        if (!hasAny) {
+            droppedReasons.blankRow++;
+            return;
+        }
+        if (!library && !number) {
+            droppedReasons.missingManuscript++;
+            return;
+        }
+        if (storyNum == null) {
+            droppedReasons.missingStoryNum++;
+            return;
+        }
+        if (!String(text || '').trim()) {
+            droppedReasons.emptyText++;
+            return;
+        }
+
+        out.push({
+            library,
+            number,
+            storyNum,
+            text,
+            _sourceRow: idx + 1,
+        });
+    });
+
+    const droppedRows = Object.values(droppedReasons).reduce((s, n) => s + n, 0);
+    return {
+        rows: out,
+        audit: {
+            totalRows: rows.length,
+            keptRows: out.length,
+            droppedRows,
+            droppedReasons,
+        },
+    };
+}
+
+function parseMssSupplement(resp) {
+    if (!resp?.table?.rows?.length) return new Map();
+    const cols = resp.table.cols || [];
+    const rows = resp.table.rows || [];
+    const labels = cols.map(c => cleanLabel(c.label || ''));
+
+    const findCol = (...patterns) => labels.findIndex(l => patterns.some(re => re.test(l)));
+
+    const libIdx = findCol(/library/i, /repository/i, /ספרי/i, /ספרייה/i, /מקום/i, /city/i);
+    const numIdx = findCol(/shelf/i, /shelfmark/i, /ms\.?\s*number/i, /כתב\s*יד/i, /מספר/i, /sign/i);
+    const yearIdx = findCol(/year/i, /date/i, /תאריך/i, /שנה/i, /מאה/i, /century/i);
+    const centuryIdx = findCol(/century/i, /מאה/i, /תקופה/i);
+    const scriptIdx = findCol(/script/i, /hand/i, /כתיבה/i, /סוג.*כתב/i, /type.*writing/i);
+    const placeIdx = findCol(/place/i, /origin/i, /city/i, /מקום/i, /מוצא/i);
+
+    const out = new Map();
+    rows.forEach(r => {
+        const library = cellStr(r, libIdx >= 0 ? libIdx : 0);
+        const number = cellStr(r, numIdx >= 0 ? numIdx : 1);
+        if (!library && !number) return;
+
+        const key = normalizedMsKey(library, number);
+        const yearCandidate = [
+            yearIdx >= 0 ? cellStr(r, yearIdx) : '',
+            ...labels.map((_, idx) => cellStr(r, idx)).slice(0, 20),
+        ].find(v => extractYearFromString(v) != null) || '';
+
+        const year = extractYearFromString(yearCandidate);
+        const century = centuryIdx >= 0 ? cellStr(r, centuryIdx) : '';
+        const scriptType = scriptIdx >= 0 ? cellStr(r, scriptIdx) : '';
+        const place = placeIdx >= 0 ? cellStr(r, placeIdx) : '';
+
+        if (!year && !scriptType && !place && !century) return;
+        out.set(key, { year, century: century || '', scriptType: scriptType || '', place: place || '' });
+    });
+    return out;
+}
+
+function mergeSupplementIntoMss(baseMss, supplements) {
+    if (!supplements.length) return baseMss;
+    const mergedMap = new Map();
+    supplements.forEach(map => {
+        map.forEach((val, key) => {
+            const prev = mergedMap.get(key) || {};
+            mergedMap.set(key, {
+                year: prev.year ?? val.year,
+                century: prev.century || val.century || '',
+                scriptType: prev.scriptType || val.scriptType || '',
+                place: prev.place || val.place || '',
+            });
+        });
+    });
+
+    return baseMss.map(ms => {
+        const sup = mergedMap.get(normalizedMsKey(ms.library, ms.number));
+        if (!sup) return ms;
+        return {
+            ...ms,
+            year: ms.year ?? sup.year ?? null,
+            century: ms.century || sup.century || '',
+            scriptType: ms.scriptType || sup.scriptType || '',
+            place: ms.place || sup.place || '',
+        };
+    });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   SIMILARITY & LAYOUT
+═══════════════════════════════════════════════════════════ */
+function jaccard(w1, w2) {
+    if (!w1.length && !w2.length) return 0;
+    const s2   = new Set(w2);
+    const inter = w1.filter(w => s2.has(w)).length;
+    const union = new Set([...w1, ...w2]).size;
+    return union ? inter / union : 0;
+}
+
+function normalizeToken(t) {
+    if (window.SarfattiAlignment?.normalizeToken) {
+        return window.SarfattiAlignment.normalizeToken(t);
+    }
+    return (t || '')
+        .toLowerCase()
+        .replace(/[\u0591-\u05c7]/g, '')
+        .replace(/[ך]/g, 'כ')
+        .replace(/[ם]/g, 'מ')
+        .replace(/[ן]/g, 'נ')
+        .replace(/[ף]/g, 'פ')
+        .replace(/[ץ]/g, 'צ')
+        .replace(/[׳״]/g, '')
+        .replace(/["'.,;:!?()[\]{}<>\-_/\\|]+/g, '')
+        .trim();
+}
+
+function tokenizeText(txt) {
+    if (window.SarfattiAlignment?.tokenizeText) {
+        return window.SarfattiAlignment.tokenizeText(txt);
+    }
+    return String(txt || '')
+        .split(/\s+/)
+        .map(normalizeToken)
+        .filter(Boolean);
+}
+
+function textJaccard(a, b) {
+    if (window.SarfattiAlignment?.textJaccard) {
+        return window.SarfattiAlignment.textJaccard(a, b);
+    }
+    const wa = new Set(tokenizeText(a));
+    const wb = new Set(tokenizeText(b));
+    if (!wa.size && !wb.size) return 1;
+    let inter = 0;
+    wa.forEach(w => { if (wb.has(w)) inter++; });
+    const union = new Set([...wa, ...wb]).size;
+    return union ? inter / union : 0;
+}
+
+function textDiffProfile(baseText, witnessText) {
+    const a = tokenizeText(baseText);
+    const b = tokenizeText(witnessText);
+    const ac = {};
+    const bc = {};
+    a.forEach(t => { ac[t] = (ac[t] || 0) + 1; });
+    b.forEach(t => { bc[t] = (bc[t] || 0) + 1; });
+
+    let shared = 0;
+    let added = 0;
+    let removed = 0;
+    const vocab = new Set([...Object.keys(ac), ...Object.keys(bc)]);
+    vocab.forEach(t => {
+        const av = ac[t] || 0;
+        const bv = bc[t] || 0;
+        shared += Math.min(av, bv);
+        if (bv > av) added += (bv - av);
+        if (av > bv) removed += (av - bv);
+    });
+
+    const lenRatio = Math.max(0, 1 - Math.abs(a.length - b.length) / Math.max(1, Math.max(a.length, b.length)));
+    const jac = textJaccard(baseText, witnessText);
+    const score = (jac * 0.75) + (lenRatio * 0.25);
+
+    return { jac, lenRatio, score, shared, added, removed, baseLen: a.length, witnessLen: b.length };
+}
+
+function wordLevelWitnessDiff(baseText, witnessText) {
+    const baseSeq = String(baseText || '')
+        .split(/\s+/)
+        .filter(Boolean)
+        .map(raw => ({ raw, norm: normalizeToken(raw) }))
+        .filter(t => t.norm);
+    const witnessSeq = String(witnessText || '')
+        .split(/\s+/)
+        .filter(Boolean)
+        .map(raw => ({ raw, norm: normalizeToken(raw) }))
+        .filter(t => t.norm);
+
+    const n = baseSeq.length;
+    const m = witnessSeq.length;
+    const dp = Array.from({ length: n + 1 }, () => Array(m + 1).fill(0));
+
+    for (let i = n - 1; i >= 0; i--) {
+        for (let j = m - 1; j >= 0; j--) {
+            if (baseSeq[i].norm === witnessSeq[j].norm) {
+                dp[i][j] = dp[i + 1][j + 1] + 1;
+            } else {
+                dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+            }
+        }
+    }
+
+    const tokens = [];
+    const removedWords = [];
+    let i = 0;
+    let j = 0;
+    while (i < n && j < m) {
+        if (baseSeq[i].norm === witnessSeq[j].norm) {
+            tokens.push({ raw: witnessSeq[j].raw, kind: 'shared' });
+            i++;
+            j++;
+            continue;
+        }
+        if (dp[i + 1][j] >= dp[i][j + 1]) {
+            removedWords.push(baseSeq[i].raw);
+            i++;
+        } else {
+            tokens.push({ raw: witnessSeq[j].raw, kind: 'added' });
+            j++;
+        }
+    }
+    while (i < n) {
+        removedWords.push(baseSeq[i].raw);
+        i++;
+    }
+    while (j < m) {
+        tokens.push({ raw: witnessSeq[j].raw, kind: 'added' });
+        j++;
+    }
+
+    const addedCount = tokens.reduce((s, t) => s + (t.kind === 'added' ? 1 : 0), 0);
+    return { tokens, removedWords, removedCount: removedWords.length, addedCount };
+}
+
+function splitSynopsisText(txt) {
+    if (window.SarfattiAlignment?.splitSynopsisText) {
+        return window.SarfattiAlignment.splitSynopsisText(txt);
+    }
+    const cleaned = String(txt || '').replace(/\r/g, '').trim();
+    if (!cleaned) return [];
+    const marked = cleaned
+        .replace(/([.!?;:։\u05c3])\s+/g, '$1|||')
+        .replace(/\n{2,}/g, '|||');
+    const rawSegs = marked
+        .split(/(?:\n|\|\|\|)/)
+        .map(s => s.replace(/\s+/g, ' ').trim())
+        .filter(Boolean);
+    const merged = [];
+    rawSegs.forEach(seg => {
+        if (!merged.length) {
+            merged.push(seg);
+            return;
+        }
+        const tokenLen = tokenizeText(seg).length;
+        if (tokenLen < 4) {
+            merged[merged.length - 1] = `${merged[merged.length - 1]} ${seg}`.trim();
+        } else {
+            merged.push(seg);
+        }
+    });
+    if (merged.length > 2) return merged;
+    // fallback: chunk by length if punctuation is sparse
+    const words = cleaned.split(/\s+/).filter(Boolean);
+    const chunks = [];
+    for (let i = 0; i < words.length; i += 18) {
+        chunks.push(words.slice(i, i + 18).join(' '));
+    }
+    return chunks;
+}
+
+function segmentSimilarity(a, b) {
+    if (window.SarfattiAlignment?.segmentSimilarity) {
+        return window.SarfattiAlignment.segmentSimilarity(a, b);
+    }
+    const jac = textJaccard(a, b);
+    const ta = tokenizeText(a);
+    const tb = tokenizeText(b);
+    if (!ta.length && !tb.length) return 1;
+    const lenRatio = Math.max(0, 1 - Math.abs(ta.length - tb.length) / Math.max(1, Math.max(ta.length, tb.length)));
+    return (jac * 0.82) + (lenRatio * 0.18);
+}
+
+function alignWitnessSegmentsToBase(baseSegs, witnessSegs, witnessText) {
+    if (window.SarfattiAlignment?.alignToBaseRefined && witnessText != null) {
+        return window.SarfattiAlignment.alignToBaseRefined(baseSegs, witnessText, { maxCells: 180000, minScore: 0.55 });
+    }
+    if (window.SarfattiAlignment?.alignToBase) {
+        return window.SarfattiAlignment.alignToBase(baseSegs, witnessSegs, { maxCells: 180000 });
+    }
+    const safeBase = Array.isArray(baseSegs) ? baseSegs : [];
+    const safeWitness = Array.isArray(witnessSegs) ? witnessSegs : [];
+    const n = safeBase.length;
+    const m = safeWitness.length;
+    if (!n) return [];
+    if (!m) return Array.from({ length: n }, () => '');
+
+    const maxCells = 120000;
+    if ((n + 1) * (m + 1) > maxCells) {
+        // Fallback for very large matrices: keep app responsive and avoid OOM.
+        const out = Array.from({ length: n }, () => '');
+        const minLen = Math.min(n, m);
+        for (let i = 0; i < minLen; i++) out[i] = safeWitness[i] || '';
+        if (m > n) out[n - 1] = `${out[n - 1]} ${safeWitness.slice(n).join(' ')}`.trim();
+        return out;
+    }
+
+    const NEG = -1e9;
+    const score = Array.from({ length: n + 1 }, () => Array(m + 1).fill(NEG));
+    const back = Array.from({ length: n + 1 }, () => Array(m + 1).fill(null));
+    score[0][0] = 0;
+
+    for (let i = 0; i <= n; i++) {
+        for (let j = 0; j <= m; j++) {
+            const cur = score[i][j];
+            if (cur <= NEG / 2) continue;
+
+            if (i < n && j < m) {
+                const sim = segmentSimilarity(safeBase[i], safeWitness[j]);
+                if (sim >= 0.15) {
+                    const matchScore = (sim * 4.2) - 2.2 - (sim < 0.25 ? 1.2 : 0);
+                    const cand = cur + matchScore;
+                    if (cand > score[i + 1][j + 1]) {
+                        score[i + 1][j + 1] = cand;
+                        back[i + 1][j + 1] = { pi: i, pj: j, op: 'M' };
+                    }
+                }
+            }
+            if (i < n) {
+                const cand = cur - 0.50;
+                if (cand > score[i + 1][j]) {
+                    score[i + 1][j] = cand;
+                    back[i + 1][j] = { pi: i, pj: j, op: 'D' };
+                }
+            }
+            if (j < m) {
+                const cand = cur - 0.50;
+                if (cand > score[i][j + 1]) {
+                    score[i][j + 1] = cand;
+                    back[i][j + 1] = { pi: i, pj: j, op: 'I' };
+                }
+            }
+        }
+    }
+
+    const ops = [];
+    let i = n, j = m;
+    while (i > 0 || j > 0) {
+        const b = back[i][j];
+        if (!b) break;
+        if (b.op === 'M') ops.push({ type: 'M', baseIdx: i - 1, witIdx: j - 1 });
+        if (b.op === 'D') ops.push({ type: 'D', baseIdx: i - 1 });
+        if (b.op === 'I') ops.push({ type: 'I', witIdx: j - 1 });
+        i = b.pi;
+        j = b.pj;
+    }
+    ops.reverse();
+
+    const assigned = Array.from({ length: n }, () => []);
+    let lastBase = 0;
+    ops.forEach(op => {
+        if (op.type === 'M') {
+            assigned[op.baseIdx].push(safeWitness[op.witIdx]);
+            lastBase = op.baseIdx;
+            return;
+        }
+        if (op.type === 'D') {
+            lastBase = op.baseIdx;
+            return;
+        }
+        if (op.type === 'I') {
+            const target = Math.max(0, Math.min(n - 1, lastBase));
+            assigned[target].push(safeWitness[op.witIdx]);
+        }
+    });
+
+    return assigned.map(parts => parts.join(' '));
+}
+
+// Spearman footrule normalized to [0,1] similarity.
+function orderSimilarity(orderMapA, orderMapB) {
+    const common = Object.keys(orderMapA).filter(k => orderMapB[k] !== undefined);
+    const n = common.length;
+    if (n < 2) return { similarity: 0, overlap: n, distance: 1 };
+    const sumAbs = common.reduce((s, k) => s + Math.abs(orderMapA[k] - orderMapB[k]), 0);
+    const maxF = n % 2 === 0 ? (n * n) / 2 : ((n * n) - 1) / 2;
+    const dist = Math.min(1, sumAbs / Math.max(1, maxF));
+    return { similarity: 1 - dist, overlap: n, distance: dist };
+}
+
+function buildTreeFromDistance(labels, getDistance) {
+    if (!labels.length) return null;
+    let clusters = labels.map((label, i) => ({
+        id: i,
+        label,
+        members: [i],
+        node: { label, members: [i], height: 0 },
+    }));
+
+    while (clusters.length > 1) {
+        let bestA = 0, bestB = 1, bestD = Infinity;
+        for (let a = 0; a < clusters.length; a++) {
+            for (let b = a + 1; b < clusters.length; b++) {
+                const ca = clusters[a].members;
+                const cb = clusters[b].members;
+                let s = 0, c = 0;
+                ca.forEach(i => cb.forEach(j => { s += getDistance(i, j); c++; }));
+                const d = c ? s / c : 1;
+                if (d < bestD) {
+                    bestD = d;
+                    bestA = a;
+                    bestB = b;
+                }
+            }
+        }
+
+        const a = clusters[bestA];
+        const b = clusters[bestB];
+        const merged = {
+            id: Math.min(a.id, b.id),
+            label: null,
+            members: [...a.members, ...b.members].sort((x, y) => x - y),
+            node: {
+                label: null,
+                height: bestD,
+                members: [...a.members, ...b.members],
+                left: a.node,
+                right: b.node,
+            },
+        };
+        clusters = clusters.filter((_, idx) => idx !== bestA && idx !== bestB);
+        clusters.push(merged);
+    }
+
+    return clusters[0].node;
+}
+
+function forceLayout(n, simPairs, W, H) {
+    if (!n) return [];
+    let pos = Array.from({ length: n }, (_, i) => ({
+        x: W / 2 + W * 0.38 * Math.cos(2 * Math.PI * i / n),
+        y: H / 2 + H * 0.38 * Math.sin(2 * Math.PI * i / n),
+    }));
+
+    for (let iter = 0; iter < 180; iter++) {
+        const f = Array.from({ length: n }, () => ({ fx: 0, fy: 0 }));
+        for (let i = 0; i < n; i++) {
+            for (let j = i + 1; j < n; j++) {
+                const dx = pos[j].x - pos[i].x;
+                const dy = pos[j].y - pos[i].y;
+                const d  = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
+                // repulsion
+                const rep = 5000 / (d * d);
+                f[i].fx -= rep * dx / d;  f[i].fy -= rep * dy / d;
+                f[j].fx += rep * dx / d;  f[j].fy += rep * dy / d;
+            }
+        }
+        // attraction along similarity edges
+        simPairs.forEach(({ i, j, sim }) => {
+            const dx = pos[j].x - pos[i].x;
+            const dy = pos[j].y - pos[i].y;
+            const d  = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
+            const ideal = (1 - sim) * 260 + 30;
+            const att   = 0.5 * (d - ideal);
+            f[i].fx += att * dx / d;  f[i].fy += att * dy / d;
+            f[j].fx -= att * dx / d;  f[j].fy -= att * dy / d;
+        });
+        const damp = Math.max(0.01, 0.08 - iter * 0.0004);
+        pos = pos.map((p, i) => ({
+            x: Math.max(55, Math.min(W - 55, p.x + f[i].fx * damp)),
+            y: Math.max(30, Math.min(H - 30,  p.y + f[i].fy * damp)),
+        }));
+    }
+    return pos;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   COLOUR PALETTE  (one colour per work)
+═══════════════════════════════════════════════════════════ */
+const PALETTE = [
+    '#4f46e5','#0891b2','#059669','#d97706',
+    '#dc2626','#7c3aed','#0d9488','#b45309','#be185d',
+];
+const workColor = (workNames, workName) => {
+    const i = workNames.indexOf(workName);
+    return PALETTE[i >= 0 ? i % PALETTE.length : 0] || '#94a3b8';
+};
+
+/* ═══════════════════════════════════════════════════════════
+   I18N
+═══════════════════════════════════════════════════════════ */
+const STRINGS = {
+  appTitle:    { he: 'כתבי יד ר\u05f3 ראובן צרפתי',              en: "R. Reuven Sarfatti Manuscripts" },
+  appSub:      { he: 'מאגר כ\u05f4י · איגרת הסיפורים',           en: "MS Database · Igeret ha-Sipurim" },
+  tabInventory:{ he: 'מצאי כתבי יד',                              en: 'MS Inventory' },
+  tabOrder:    { he: 'סדר הסיפורים',                               en: 'Story Order' },
+  tabTexts:    { he: 'טקסטים',                                     en: 'Texts' },
+  langBtn:     { he: 'English',                                    en: '\u05e2\u05d1\u05e8\u05d9\u05ea' },
+  loadingTitle:{ he: 'טוען נתונים מ-Google Sheets\u2026',         en: 'Loading data from Google Sheets\u2026' },
+  loadingSub:  { he: 'שלושה גיליונות נטענים במקביל',               en: 'Three sheets loading in parallel' },
+  errTitle:    { he: 'שגיאות טעינה:',                              en: 'Loading errors:' },
+  errHint:     { he: 'ודא שהגיליונות משותפים לציבור ("כל אחד עם הקישור") וכי יש חיבור לאינטרנט.', en: 'Ensure sheets are publicly shared ("anyone with the link") and that you have internet access.' },
+  viewTable:   { he: '\u25c9 טבלת מצאי',                           en: '\u25c9 Table' },
+  viewMap:     { he: '\u25ce מפת קרבה',                            en: '\u25ce Proximity Map' },
+  footer:      { he: 'פרויקט מחקר: ר\u05f3 ראובן צרפתי · נתונים נטענים בזמן אמת מ-Google Sheets', en: 'Research project: R. Reuven Sarfatti · Data loaded live from Google Sheets' },
+  searchPh:    { he: 'חיפוש לפי שם ספרייה או מספר כ\u05f4י\u2026', en: 'Search by library or shelfmark\u2026' },
+  library:     { he: 'ספרייה',                                     en: 'Library' },
+  shelfmark:   { he: 'מספר',                                       en: 'Shelfmark' },
+  mssOf:       { he: 'כ\u05f4י מתוך',                              en: 'of' },
+  mssLabel:    { he: 'כ\u05f4י',                                   en: 'MSS' },
+  minThresh:   { he: 'הצג קשרים מדמיון תוכן:',                    en: 'Show connections from content similarity:' },
+  connections: { he: 'קשרים',                                      en: 'connections' },
+  clickHint:   { he: 'לחץ על כתב יד לבחירתו ולהצגת קרוביו',       en: 'Click a node to select and see neighbours' },
+  clearSel:    { he: '\u00d7 נקה בחירה',                           en: '\u00d7 Clear selection' },
+  selectedMs:  { he: 'כ\u05f4י נבחר',                              en: 'Selected MS' },
+  connectedMs: { he: 'כ\u05f4י קשורים (מעל',                       en: 'MSS connected (above' },
+  noNeighbours:{ he: 'אין כ\u05f4י קרובים בסף הנוכחי. הורד את הסף.', en: 'No nearby MSS at this threshold. Lower it.' },
+  storyName:   { he: 'שם הסיפור',                                  en: 'Story name' },
+  folio:       { he: 'עמוד',                                       en: 'Folio' },
+  yellowNote:  { he: 'צהוב = סדר שונה מהקנוני',                    en: 'Yellow = order differs from canonical' },
+  selectStory: { he: 'בחר סיפור לצפייה בטקסטים',                  en: 'Select a story to view texts' },
+  storyPrefix: { he: 'סיפור',                                      en: 'Story' },
+  noTexts:     { he: 'אין נתוני טקסטים זמינים',                    en: 'No text data available' },
+  pickStory:   { he: 'בחר סיפור מהרשימה לצפייה בטקסטים',           en: 'Select a story from the list' },
+  sarfattiNum: { he: 'לפי מספור צרפתי',                            en: "by Sarfatti's numbering" },
+};
+const T = (key, lang) => STRINGS[key]?.[lang || 'he'] ?? STRINGS[key]?.he ?? key;
+
+/* ═══════════════════════════════════════════════════════════
+   TAB 1 — INVENTORY TABLE
+   Rows = MSS, Columns = 9 works, ● = present
+═══════════════════════════════════════════════════════════ */
+function InventoryTable({ mssData, workNames, metaFields, lang }) {
+    const [filter, setFilter] = useState('');
+    const [yearFilter, setYearFilter] = useState('all');
+    const [scriptFilter, setScriptFilter] = useState('all');
+    const [quickFilter, setQuickFilter] = useState('all');
+    const [groupBy, setGroupBy] = useState('none'); // none | year | script
+    const [draggedWork, setDraggedWork] = useState(null);
+    const [dotTip, setDotTip] = useState(null);
+    const [rowOrder, setRowOrder] = useState([]);
+    const [workOrder, setWorkOrder] = useState([]);
+    const [sortSpec, setSortSpec] = useState({ key: 'manual', dir: 'asc' });
+
+    useEffect(() => {
+        setRowOrder(prev => {
+            const ids = mssData.map(ms => ms.id);
+            const kept = prev.filter(id => ids.includes(id));
+            const missing = ids.filter(id => !kept.includes(id));
+            return [...kept, ...missing];
+        });
+    }, [mssData]);
+
+    useEffect(() => {
+        setWorkOrder(prev => {
+            const kept = prev.filter(w => workNames.includes(w));
+            const missing = workNames.filter(w => !kept.includes(w));
+            return [...kept, ...missing];
+        });
+    }, [workNames]);
+
+    const byId = useMemo(() => {
+        const m = {};
+        mssData.forEach(ms => { m[ms.id] = ms; });
+        return m;
+    }, [mssData]);
+
+    const yearOptions = useMemo(() => {
+        const ys = [...new Set(mssData.map(ms => String(ms.year || '').trim()).filter(Boolean))];
+        ys.sort((a, b) => yearSortValue(a) - yearSortValue(b));
+        return ys;
+    }, [mssData]);
+
+    const scriptOptions = useMemo(() => {
+        const ss = [...new Set(mssData.map(ms => String(ms.scriptType || '').trim()).filter(Boolean))];
+        ss.sort((a, b) => a.localeCompare(b, 'he'));
+        return ss;
+    }, [mssData]);
+
+    const filteredIds = useMemo(() => {
+        const sourceIds = rowOrder.length ? rowOrder : mssData.map(ms => ms.id);
+        const q = filter.toLowerCase();
+        return sourceIds.filter(id => {
+            const ms = byId[id];
+            if (!ms) return false;
+            const yearValue = String(ms.year || '').trim();
+            const scriptValue = String(ms.scriptType || '').trim();
+
+            const textPass = !q ||
+                ms.library.toLowerCase().includes(q) ||
+                ms.number.toLowerCase().includes(q) ||
+                scriptValue.toLowerCase().includes(q) ||
+                (ms.century || '').toLowerCase().includes(q);
+
+            const yearPass = yearFilter === 'all' || yearValue === yearFilter;
+            const scriptPass = scriptFilter === 'all' || scriptValue === scriptFilter;
+            return textPass && yearPass && scriptPass;
+        });
+    }, [rowOrder, mssData, byId, filter, yearFilter, scriptFilter]);
+
+    const shown = useMemo(() => {
+        const ids = [...filteredIds];
+        if (sortSpec.key !== 'manual') {
+            const collator = new Intl.Collator('he', { numeric: true, sensitivity: 'base' });
+            ids.sort((aId, bId) => {
+                const a = byId[aId];
+                const b = byId[bId];
+                if (!a || !b) return 0;
+
+                let cmp = 0;
+                if (sortSpec.key.startsWith('work:')) {
+                    const work = sortSpec.key.slice(5);
+                    const av = a.works.includes(work) ? 1 : 0;
+                    const bv = b.works.includes(work) ? 1 : 0;
+                    cmp = bv - av;
+                } else if (sortSpec.key === 'year') {
+                    cmp = yearSortValue(a.year) - yearSortValue(b.year);
+                } else if (sortSpec.key === 'library') {
+                    cmp = collator.compare(a.library || '', b.library || '');
+                } else if (sortSpec.key === 'number') {
+                    cmp = collator.compare(a.number || '', b.number || '');
+                } else if (sortSpec.key === 'century') {
+                    cmp = collator.compare(a.century || '', b.century || '');
+                } else if (sortSpec.key === 'scriptType') {
+                    cmp = collator.compare(a.scriptType || '', b.scriptType || '');
+                }
+
+                if (cmp === 0) cmp = collator.compare(a.library || '', b.library || '');
+                return sortSpec.dir === 'asc' ? cmp : -cmp;
+            });
+        }
+        return ids.map(id => byId[id]).filter(Boolean);
+    }, [filteredIds, sortSpec, byId]);
+
+    const shownWorkNames = useMemo(() => {
+        if (!workOrder.length) return workNames;
+        const kept = workOrder.filter(w => workNames.includes(w));
+        const missing = workNames.filter(w => !kept.includes(w));
+        return [...kept, ...missing];
+    }, [workOrder, workNames]);
+
+    const rowIndexById = useMemo(() => {
+        const m = {};
+        shown.forEach((ms, idx) => { m[ms.id] = idx; });
+        return m;
+    }, [shown]);
+
+    const groupedShown = useMemo(() => {
+        if (groupBy === 'none') {
+            return [{ key: '__all', label: '', rows: shown, sortKey: '' }];
+        }
+
+        const missingLabel = groupBy === 'year'
+            ? (lang === 'en' ? 'No year' : 'ללא שנה')
+            : (lang === 'en' ? 'No script type' : 'ללא סוג כתיבה');
+
+        const bucket = {};
+        shown.forEach(ms => {
+            const raw = groupBy === 'year'
+                ? String(ms.year || '').trim()
+                : String(ms.scriptType || '').trim();
+            const key = raw || '__missing';
+            if (!bucket[key]) {
+                bucket[key] = {
+                    key,
+                    sortKey: raw,
+                    label: raw || missingLabel,
+                    rows: [],
+                };
+            }
+            bucket[key].rows.push(ms);
+        });
+
+        const groups = Object.values(bucket);
+        if (groupBy === 'year') {
+            groups.sort((a, b) => {
+                const av = a.key === '__missing' ? 999999 : yearSortValue(a.sortKey);
+                const bv = b.key === '__missing' ? 999999 : yearSortValue(b.sortKey);
+                return av - bv || a.label.localeCompare(b.label, 'he');
+            });
+        } else {
+            groups.sort((a, b) => a.label.localeCompare(b.label, 'he'));
+        }
+        return groups;
+    }, [shown, groupBy, lang]);
+
+    const moveRow = (id, delta) => {
+        setSortSpec({ key: 'manual', dir: 'asc' });
+        setRowOrder(prev => {
+            const arr = [...prev];
+            const i = arr.indexOf(id);
+            if (i < 0) return prev;
+            const j = Math.max(0, Math.min(arr.length - 1, i + delta));
+            if (i === j) return prev;
+            const tmp = arr[i];
+            arr[i] = arr[j];
+            arr[j] = tmp;
+            return arr;
+        });
+    };
+
+    const reorderWorks = (dragWork, targetWork) => {
+        if (!dragWork || !targetWork || dragWork === targetWork) return;
+        setWorkOrder(prev => {
+            const arr = [...(prev.length ? prev : workNames)];
+            const from = arr.indexOf(dragWork);
+            const to = arr.indexOf(targetWork);
+            if (from < 0 || to < 0) return arr;
+            arr.splice(from, 1);
+            arr.splice(to, 0, dragWork);
+            return arr;
+        });
+    };
+
+    const applyQuickFilter = value => {
+        setQuickFilter(value);
+        if (value === 'all') {
+            setYearFilter('all');
+            setScriptFilter('all');
+            return;
+        }
+        if (value.startsWith('year::')) {
+            setYearFilter(value.slice('year::'.length));
+            setScriptFilter('all');
+            return;
+        }
+        if (value.startsWith('script::')) {
+            setScriptFilter(value.slice('script::'.length));
+            setYearFilter('all');
+        }
+    };
+
+    const toggleSort = key => {
+        setSortSpec(prev => {
+            if (prev.key === key) {
+                return { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' };
+            }
+            return { key, dir: 'asc' };
+        });
+    };
+
+    const sortMark = key => {
+        if (sortSpec.key !== key) return '';
+        return sortSpec.dir === 'asc' ? ' ▲' : ' ▼';
+    };
+
+    return (
+        <div className="flex flex-col h-full">
+            {/* toolbar */}
+            <div className="px-3 py-2 border-b border-slate-200 bg-slate-50 flex gap-2 items-center flex-wrap shrink-0">
+                <input
+                    className="border border-slate-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 flex-1 min-w-[200px] bg-white"
+                    placeholder={T('searchPh', lang)}
+                    value={filter} onChange={e => setFilter(e.target.value)}
+                />
+                <button
+                    onClick={() => setSortSpec({ key: 'manual', dir: 'asc' })}
+                    className={`text-xs px-2.5 py-1.5 rounded-lg border ${sortSpec.key === 'manual' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}`}>
+                    {lang === 'en' ? 'Manual order' : 'סדר ידני'}
+                </button>
+                <select
+                    value={quickFilter}
+                    onChange={e => applyQuickFilter(e.target.value)}
+                    className="text-xs px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-700 min-w-[180px]">
+                    <option value="all">{lang === 'en' ? 'All years / scripts' : 'כל השנים / כל סוגי הכתיבה'}</option>
+                    <optgroup label={lang === 'en' ? 'Year' : 'שנה'}>
+                        {yearOptions.map(y => <option key={`qy-${y}`} value={`year::${y}`}>{y}</option>)}
+                    </optgroup>
+                    <optgroup label={lang === 'en' ? 'Script type' : 'סוג כתיבה'}>
+                        {scriptOptions.map(s => <option key={`qs-${s}`} value={`script::${s}`}>{s}</option>)}
+                    </optgroup>
+                </select>
+                <select
+                    value={groupBy}
+                    onChange={e => setGroupBy(e.target.value)}
+                    className="text-xs px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-700">
+                    <option value="none">{lang === 'en' ? 'No grouping' : 'ללא קיבוץ'}</option>
+                    <option value="year">{lang === 'en' ? 'Group by year' : 'קיבוץ לפי שנה'}</option>
+                    <option value="script">{lang === 'en' ? 'Group by script type' : 'קיבוץ לפי סוג כתיבה'}</option>
+                </select>
+                <span className="text-xs text-slate-500 whitespace-nowrap">
+                    {shown.length} {T('mssOf', lang)} {mssData.length} {T('mssLabel', lang)}
+                </span>
+            </div>
+
+            {/* table */}
+            <div className="overflow-auto flex-1" onMouseLeave={() => setDotTip(null)}>
+                <table className="text-sm border-collapse w-full min-w-max">
+                    <thead>
+                        <tr className="bg-slate-800 text-white text-xs sticky top-0 z-10">
+                            <th className="text-center px-1 py-2.5 font-semibold border-l border-slate-600 min-w-[48px]">
+                                {lang === 'en' ? 'Move' : 'הזזה'}
+                            </th>
+                            <th className="text-right px-3 py-2.5 font-semibold sticky right-0 bg-slate-800 z-20 border-l border-slate-600 min-w-[220px]">
+                                <button className="w-full text-right" onClick={() => toggleSort('library')}>
+                                    {T('library', lang)}{sortMark('library')}
+                                </button>
+                            </th>
+                            <th className="text-right px-3 py-2.5 font-semibold border-l border-slate-600 min-w-[130px]">
+                                <button className="w-full text-right" onClick={() => toggleSort('number')}>
+                                    {T('shelfmark', lang)}{sortMark('number')}
+                                </button>
+                            </th>
+                            <th className="text-center px-2 py-2.5 font-semibold border-l border-slate-600 min-w-[75px]">
+                                <button className="w-full text-center" onClick={() => toggleSort('year')}>
+                                    {lang === 'en' ? 'Year' : 'שנה'}{sortMark('year')}
+                                </button>
+                            </th>
+                            <th className="text-center px-2 py-2.5 font-semibold border-l border-slate-600 min-w-[78px]">
+                                <button className="w-full text-center" onClick={() => toggleSort('century')}>
+                                    {lang === 'en' ? 'Century' : 'מאה'}{sortMark('century')}
+                                </button>
+                            </th>
+                            <th className="text-right px-2 py-2.5 font-semibold border-l border-slate-600 min-w-[125px]">
+                                <button className="w-full text-right" onClick={() => toggleSort('scriptType')}>
+                                    {lang === 'en' ? 'Script type' : 'סוג כתיבה'}{sortMark('scriptType')}
+                                </button>
+                            </th>
+                            {shownWorkNames.map((w, i) => (
+                                <th key={w}
+                                    style={{ borderBottom: `3px solid ${PALETTE[i % PALETTE.length]}` }}
+                                    draggable
+                                    onDragStart={() => setDraggedWork(w)}
+                                    onDragOver={e => e.preventDefault()}
+                                    onDrop={() => { reorderWorks(draggedWork, w); setDraggedWork(null); }}
+                                    onDragEnd={() => setDraggedWork(null)}
+                                    className="px-2 py-2.5 font-normal text-center text-[11px] whitespace-nowrap border-l border-slate-600 min-w-[92px] cursor-move select-none">
+                                    <div className="flex items-center justify-center gap-1.5">
+                                        <span className="text-slate-400">⋮⋮</span>
+                                        <button className="text-center" onClick={() => toggleSort(`work:${w}`)}>
+                                            {w}{sortMark(`work:${w}`)}
+                                        </button>
+                                    </div>
+                                    </th>
+                            ))}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {groupedShown.map(group => (
+                            <React.Fragment key={group.key}>
+                                {groupBy !== 'none' && (
+                                    <tr className="bg-indigo-50/60 border-y border-indigo-100">
+                                        <td colSpan={6 + shownWorkNames.length} className="px-3 py-1.5 text-[11px] text-indigo-700 font-semibold">
+                                            {group.label} · {group.rows.length} {lang === 'en' ? 'manuscripts' : 'כתבי יד'}
+                                        </td>
+                                    </tr>
+                                )}
+                                {group.rows.map(ms => {
+                                    const rowIdx = rowIndexById[ms.id] ?? 0;
+                                    const moveDisabled = groupBy !== 'none';
+                                    return (
+                                        <tr key={ms.id}
+                                            className="border-b border-slate-100 transition-colors hover:bg-indigo-50">
+                                            <td className="px-1 py-1 border-l border-slate-100 text-center">
+                                                <div className="inline-flex rounded border border-slate-200 overflow-hidden bg-white">
+                                                    <button
+                                                        onClick={e => { e.stopPropagation(); if (!moveDisabled) moveRow(ms.id, -1); }}
+                                                        disabled={moveDisabled || rowIdx === 0}
+                                                        className="px-1.5 py-0.5 text-[10px] text-slate-500 hover:bg-slate-50 disabled:opacity-30 disabled:cursor-not-allowed">
+                                                        ↑
+                                                    </button>
+                                                    <button
+                                                        onClick={e => { e.stopPropagation(); if (!moveDisabled) moveRow(ms.id, 1); }}
+                                                        disabled={moveDisabled || rowIdx === shown.length - 1}
+                                                        className="px-1.5 py-0.5 text-[10px] text-slate-500 hover:bg-slate-50 disabled:opacity-30 disabled:cursor-not-allowed border-r border-slate-200">
+                                                        ↓
+                                                    </button>
+                                                </div>
+                                            </td>
+                                            <td className="px-3 py-1.5 text-xs sticky right-0 border-l border-slate-100 z-[5] bg-white" style={{ minWidth: 220 }}>
+                                                {ms.library}
+                                            </td>
+                                            <td className="px-3 py-1.5 text-xs text-slate-600 border-l border-slate-100 whitespace-nowrap">
+                                                {ms.number}
+                                            </td>
+                                            <td className="px-2 py-1.5 text-center border-l border-slate-100 text-xs text-slate-600">
+                                                {ms.year ?? '—'}
+                                            </td>
+                                            <td className="px-2 py-1.5 text-center border-l border-slate-100 text-xs text-slate-600 whitespace-nowrap">
+                                                {ms.century || '—'}
+                                            </td>
+                                            <td className="px-2 py-1.5 text-right border-l border-slate-100 text-xs text-slate-600 whitespace-nowrap">
+                                                {ms.scriptType || '—'}
+                                            </td>
+                                            {shownWorkNames.map((w, i) => (
+                                                <td key={w} className="px-2 py-1.5 text-center border-l border-slate-100">
+                                                    {ms.works.includes(w)
+                                                        ? <span
+                                                            title={ms.workPayload?.[w] || w}
+                                                            onMouseEnter={e => {
+                                                                const payload = String(ms.workPayload?.[w] || '').trim();
+                                                                setDotTip({
+                                                                    x: e.clientX,
+                                                                    y: e.clientY,
+                                                                    msLabel: `${shortLib(ms.library)} (${ms.number})`,
+                                                                    work: w,
+                                                                    text: payload,
+                                                                    color: PALETTE[i % PALETTE.length],
+                                                                });
+                                                            }}
+                                                            onMouseMove={e => {
+                                                                setDotTip(prev => prev ? { ...prev, x: e.clientX, y: e.clientY } : prev);
+                                                            }}
+                                                            onMouseLeave={() => setDotTip(null)}
+                                                            style={{ background: PALETTE[i % PALETTE.length] }}
+                                                            className="inline-block w-3.5 h-3.5 rounded-full" />
+                                                        : <span className="text-slate-200 text-xs">·</span>
+                                                    }
+                                                </td>
+                                            ))}
+                                        </tr>
+                                    );
+                                })}
+                            </React.Fragment>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+
+            {dotTip && (
+                <div
+                    className="fixed pointer-events-none z-50 rounded-lg border border-slate-200 shadow-xl bg-white max-w-[330px]"
+                    style={{ left: dotTip.x + 12, top: dotTip.y - 10 }}>
+                    <div className="px-2.5 py-2 border-b border-slate-100" style={{ borderTop: `3px solid ${dotTip.color}` }}>
+                        <div className="text-[10px] text-slate-400">{dotTip.msLabel}</div>
+                        <div className="text-xs font-semibold text-slate-700 mt-0.5">{dotTip.work}</div>
+                    </div>
+                    <div className="px-2.5 py-2 text-xs text-slate-700 leading-relaxed heb">
+                        {dotTip.text || (lang === 'en'
+                            ? 'Presence mark only; no explicit text payload was found in this source cell.'
+                            : 'קיים סימון נוכחות בלבד; לא נמצא טקסט מפורש בתא המקור הזה.')}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+/* ═══════════════════════════════════════════════════════════
+   COMMUNITY DETECTION  (deterministic modularity optimization)
+   - Keeps only significant edges (k-NN + similarity floor)
+   - Runs Louvain-style local moves (single-level)
+   - Returns stable community ids + graph metrics
+═══════════════════════════════════════════════════════════ */
+function detectCommunities(n, allPairs, opts = {}) {
+    const k      = Math.max(1, opts.k ?? 3);
+    const minSim = opts.minSim ?? 0.1;
+
+    const byNode = Array.from({ length: n }, () => []);
+    allPairs.forEach((p, idx) => {
+        byNode[p.i].push({ idx, nb: p.j, sim: p.sim });
+        byNode[p.j].push({ idx, nb: p.i, sim: p.sim });
+    });
+
+    // Keep edge if it is in top-k of either endpoint or above global floor.
+    const keep = new Set();
+    byNode.forEach(list => {
+        list.sort((a, b) => b.sim - a.sim || a.nb - b.nb);
+        list.forEach((e, rank) => {
+            if (rank < k || e.sim >= minSim) keep.add(e.idx);
+        });
+    });
+    const significantPairs = [...keep].map(idx => allPairs[idx]);
+
+    const adj = Array.from({ length: n }, () => new Map());
+    significantPairs.forEach(({ i, j, sim }) => {
+        adj[i].set(j, sim);
+        adj[j].set(i, sim);
+    });
+
+    const deg = adj.map(a => [...a.values()].reduce((s, w) => s + w, 0));
+    const m2 = deg.reduce((s, d) => s + d, 0); // equals 2m in weighted graph
+    const isolated = deg.map(d => d === 0);
+
+    if (m2 === 0) {
+        return {
+            communities: Array.from({ length: n }, () => -1),
+            significantPairs,
+            modularity: 0,
+            density: 0,
+            communityCount: 0,
+        };
+    }
+
+    let labels = Array.from({ length: n }, (_, i) => i);
+    const order = [...Array(n).keys()].sort((a, b) => deg[b] - deg[a] || a - b);
+    const commTot = new Map(labels.map((l, i) => [l, deg[i]]));
+
+    for (let iter = 0; iter < 35; iter++) {
+        let changed = false;
+        for (const i of order) {
+            if (isolated[i]) continue;
+            const from = labels[i];
+
+            const candidates = new Set([from]);
+            adj[i].forEach((_, j) => candidates.add(labels[j]));
+
+            commTot.set(from, (commTot.get(from) || 0) - deg[i]);
+
+            let best = from;
+            let bestGain = 0;
+            candidates.forEach(c => {
+                if (c === from) return;
+                let kIn = 0;
+                adj[i].forEach((w, j) => {
+                    if (labels[j] === c) kIn += w;
+                });
+                const gain = kIn - (deg[i] * (commTot.get(c) || 0)) / m2;
+                if (gain > bestGain + 1e-9 || (Math.abs(gain - bestGain) <= 1e-9 && c < best)) {
+                    bestGain = gain;
+                    best = c;
+                }
+            });
+
+            labels[i] = best;
+            commTot.set(best, (commTot.get(best) || 0) + deg[i]);
+            if (best !== from) changed = true;
+        }
+        if (!changed) break;
+    }
+
+    // Stable renumbering: largest communities get earlier color slots.
+    const buckets = {};
+    labels.forEach((l, i) => {
+        if (isolated[i]) return;
+        if (!buckets[l]) buckets[l] = [];
+        buckets[l].push(i);
+    });
+    const remap = {};
+    Object.entries(buckets)
+        .sort((a, b) => b[1].length - a[1].length || (+a[0]) - (+b[0]))
+        .forEach(([oldId], idx) => { remap[oldId] = idx; });
+    const communities = labels.map((l, i) => isolated[i] ? -1 : remap[l]);
+
+    let q = 0;
+    significantPairs.forEach(({ i, j, sim }) => {
+        if (communities[i] < 0 || communities[j] < 0) return;
+        if (communities[i] === communities[j]) q += sim - (deg[i] * deg[j]) / m2;
+    });
+    const modularity = q / m2;
+    const density = n > 1 ? significantPairs.length / (n * (n - 1) / 2) : 0;
+    const communityCount = new Set(communities.filter(c => c >= 0)).size;
+
+    return { communities, significantPairs, modularity, density, communityCount };
+}
+
+/* ═══════════════════════════════════════════════════════════
+   TAB 1 — PROXIMITY MAP (interactive)
+    - Community colors from modularity partition
+    - Edge-free visual; network metrics in legend
+    - Scroll zoom + drag pan + hover tooltip
+═══════════════════════════════════════════════════════════ */
+function ProximityMap({ mssData, workNames, orderData, lang }) {
+    const W = 980, H = 560;
+    const NODE_R = 4;
+    const COMM_PALETTE = ['#0f766e', '#0369a1', '#b45309', '#7c3aed', '#be123c', '#475569'];
+    const ISOLATED_COLOR = '#cbd5e1';
+
+    const [renderMode, setRenderMode] = useState('links'); // links | works
+    const [linkThreshold, setLinkThreshold] = useState(0);
+    const [hoveredIdx, setHoveredIdx] = useState(null);
+    const [selectedIdx, setSelectedIdx] = useState(null);
+    const [tipPos, setTipPos] = useState({ x: 0, y: 0 });
+    const [useBiblio, setUseBiblio] = useState(false);
+    const [biblioWeight, setBiblioWeight] = useState(0.35);
+    const [useOrder, setUseOrder] = useState(false);
+    const [orderWeight, setOrderWeight] = useState(0.35);
+    const [showMethod, setShowMethod] = useState(false);
+    const [viewState, setViewState] = useState({ scale: 1, tx: 0, ty: 0 });
+    const [isPanning, setIsPanning] = useState(false);
+    const panRef = useRef(null);
+
+    const orderVectors = useMemo(() => {
+        const out = {};
+        (orderData || []).forEach(r => {
+            if (r.sarfattiNum == null || r.msOrder == null) return;
+            const key = normalizedMsKey(r.library, r.number);
+            if (!out[key]) out[key] = {};
+            out[key][r.sarfattiNum] = r.msOrder;
+        });
+        return out;
+    }, [orderData]);
+
+    const bibliographicSimilarity = (a, b) => {
+        const parts = [];
+        const sa = String(a.scriptType || '').trim();
+        const sb = String(b.scriptType || '').trim();
+        if (sa && sb) parts.push(sa === sb ? 1 : 0);
+
+        const ca = String(a.century || '').trim();
+        const cb = String(b.century || '').trim();
+        if (ca && cb) parts.push(ca === cb ? 1 : 0);
+
+        const ya = yearSortValue(a.year);
+        const yb = yearSortValue(b.year);
+        if (ya < 9999 && yb < 9999) {
+            parts.push(Math.max(0, 1 - (Math.abs(ya - yb) / 250)));
+        }
+
+        if (!parts.length) return null;
+        return parts.reduce((s, x) => s + x, 0) / parts.length;
+    };
+
+    const pairData = useMemo(() => {
+        if (!mssData.length) {
+            return {
+                pairs: [],
+                positions: [],
+                visiblePairs: [],
+                significantPairs: [],
+                communities: [],
+                stats: { modularity: 0, density: 0, edgeCount: 0, communityCount: 0, totalPairs: 0 },
+            };
+        }
+
+        const pairs = [];
+        for (let i = 0; i < mssData.length; i++) {
+            for (let j = i + 1; j < mssData.length; j++) {
+                const inv = jaccard(mssData[i].works, mssData[j].works);
+
+                const bio = useBiblio ? bibliographicSimilarity(mssData[i], mssData[j]) : null;
+
+                let ord = null;
+                if (useOrder) {
+                    const ki = normalizedMsKey(mssData[i].library, mssData[i].number);
+                    const kj = normalizedMsKey(mssData[j].library, mssData[j].number);
+                    const rel = orderSimilarity(orderVectors[ki] || {}, orderVectors[kj] || {});
+                    ord = rel.overlap >= 3 ? rel.similarity : null;
+                }
+
+                let num = inv;
+                let den = 1;
+                if (useBiblio && bio != null) {
+                    num += biblioWeight * bio;
+                    den += biblioWeight;
+                }
+                if (useOrder && ord != null) {
+                    num += orderWeight * ord;
+                    den += orderWeight;
+                }
+                const sim = den ? (num / den) : inv;
+                if (sim <= 0) continue;
+
+                pairs.push({ i, j, sim, inv, bio, ord });
+            }
+        }
+
+        const n = mssData.length;
+        const commRes = detectCommunities(n, pairs, { k: 3, minSim: Math.max(0.08, linkThreshold || 0.08) });
+        const layoutPairs = commRes.significantPairs.length ? commRes.significantPairs : pairs;
+        const visiblePairs = linkThreshold <= 0 ? [] : pairs.filter(p => p.sim >= linkThreshold);
+        const positions = forceLayout(n, layoutPairs, W, H);
+
+        return {
+            pairs,
+            positions,
+            visiblePairs,
+            significantPairs: layoutPairs,
+            communities: commRes.communities,
+            stats: {
+                modularity: commRes.modularity,
+                density: n > 1 ? visiblePairs.length / (n * (n - 1) / 2) : 0,
+                edgeCount: visiblePairs.length,
+                communityCount: commRes.communityCount,
+                totalPairs: pairs.length,
+            },
+        };
+    }, [mssData, orderVectors, useBiblio, biblioWeight, useOrder, orderWeight, linkThreshold]);
+
+    const { pairs, positions, visiblePairs, significantPairs, communities, stats } = pairData;
+
+    const nodeColor = i => communities[i] === -1
+        ? ISOLATED_COLOR
+        : COMM_PALETTE[communities[i] % COMM_PALETTE.length];
+
+    const connectorPairs = useMemo(() => {
+        if (renderMode !== 'works') return [];
+        return linkThreshold <= 0 ? significantPairs : visiblePairs;
+    }, [renderMode, linkThreshold, significantPairs, visiblePairs]);
+
+    const connectionVertices = useMemo(() => {
+        return connectorPairs.flatMap((p, idx) => {
+            const a = positions[p.i];
+            const b = positions[p.j];
+            if (!a || !b) return [];
+            const setB = new Set(mssData[p.j].works || []);
+            const sharedWorks = (mssData[p.i].works || []).filter(w => setB.has(w));
+            const labels = sharedWorks.slice(0, 2);
+            if (sharedWorks.length > 2) labels.push(`+${sharedWorks.length - 2}`);
+            if (!labels.length) labels.push(lang === 'en' ? 'shared corpus' : 'חפיפה כללית');
+            const mx = (a.x + b.x) / 2;
+            const my = (a.y + b.y) / 2;
+            const ox = ((idx % 5) - 2) * 1.8;
+            const oy = (Math.floor(idx / 5) % 5 - 2) * 1.8;
+            return labels.map((label, k) => ({
+                ...p,
+                x: mx + ox + (k - (labels.length - 1) / 2) * 7,
+                y: my + oy - (k % 2 ? 5 : -5),
+                label,
+            }));
+        });
+    }, [connectorPairs, positions, mssData, lang]);
+
+    const labelFontSize = scale => {
+        const base = 8.4;
+        const dyn = base / Math.pow(Math.max(0.6, scale), 1.18);
+        return Math.max(6, Math.min(9.5, dyn));
+    };
+
+    const commInfo = useMemo(() => {
+        const m = {};
+        communities.forEach((c, i) => {
+            const key = c === -1 ? '__iso' : String(c);
+            if (!m[key]) {
+                m[key] = {
+                    id: c,
+                    isolated: c === -1,
+                    color: c === -1 ? ISOLATED_COLOR : COMM_PALETTE[c % COMM_PALETTE.length],
+                    members: [],
+                };
+            }
+            m[key].members.push(mssData[i]);
+        });
+        return m;
+    }, [communities, mssData]);
+
+    const hoveredMs = hoveredIdx == null ? null : mssData[hoveredIdx];
+    const selectedMs = selectedIdx == null ? null : mssData[selectedIdx];
+
+    const selectedNeighbours = useMemo(() => {
+        if (selectedIdx == null) return [];
+        return pairs
+            .filter(p => p.i === selectedIdx || p.j === selectedIdx)
+            .map(p => {
+                const other = p.i === selectedIdx ? p.j : p.i;
+                const ms = mssData[other];
+                return {
+                    idx: other,
+                    ms,
+                    sim: p.sim,
+                    inv: p.inv,
+                    bio: p.bio,
+                    ord: p.ord,
+                    identicalInventory: p.inv >= 0.999,
+                };
+            })
+            .sort((a, b) => b.sim - a.sim || b.inv - a.inv);
+    }, [selectedIdx, pairs, mssData]);
+
+    if (!mssData.length) return (
+        <div className="flex items-center justify-center h-full text-slate-400 text-sm">אין נתוני כתבי יד</div>
+    );
+
+    return (
+        <div className="flex flex-col h-full overflow-hidden">
+            <div className="px-3 py-2 border-b border-slate-200 bg-slate-50 flex flex-wrap gap-3 items-center shrink-0 text-xs text-slate-600">
+                <div className="inline-flex rounded-lg border border-slate-300 overflow-hidden bg-white text-[11px]">
+                    <button onClick={() => setRenderMode('links')}
+                        className={`px-2.5 py-1 ${renderMode === 'links' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+                        {lang === 'en' ? 'Connection lines' : 'קווי קשר'}
+                    </button>
+                    <button onClick={() => setRenderMode('works')}
+                        className={`px-2.5 py-1 border-r border-slate-300 ${renderMode === 'works' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+                        {lang === 'en' ? 'Include work names' : 'כולל שמות חיבורים'}
+                    </button>
+                </div>
+
+                <label className="flex items-center gap-2 text-[11px] text-slate-500">
+                    <span>{lang === 'en' ? 'Line threshold (0 hides lines)' : 'סף דמיון לקווים (0 מסתיר קווים)'}</span>
+                    <input type="range" min="0" max="0.95" step="0.05"
+                        value={linkThreshold}
+                        onChange={e => setLinkThreshold(Number(e.target.value))}
+                        className="w-32" />
+                    <span className="font-mono px-1.5 py-0.5 rounded bg-white border border-slate-200">{Math.round(linkThreshold * 100)}%</span>
+                </label>
+
+                <div className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-1 py-1">
+                    <button
+                        onClick={() => setUseBiblio(v => !v)}
+                        className={`text-[11px] px-2 py-0.5 rounded ${useBiblio ? 'bg-emerald-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+                        {lang === 'en' ? 'Add bibliography details' : 'הוספת פרטים ביבליוגרפיים'}
+                    </button>
+                    {useBiblio && (
+                        <label className="flex items-center gap-1 px-1 text-[10px] text-slate-500">
+                            <span>{lang === 'en' ? 'weight' : 'משקל'}</span>
+                            <input type="range" min="0.1" max="1" step="0.05" value={biblioWeight}
+                                onChange={e => setBiblioWeight(Number(e.target.value))} className="w-20" />
+                            <span>{biblioWeight.toFixed(2)}</span>
+                        </label>
+                    )}
+                </div>
+
+                <div className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-1 py-1">
+                    <button
+                        onClick={() => setUseOrder(v => !v)}
+                        className={`text-[11px] px-2 py-0.5 rounded ${useOrder ? 'bg-amber-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+                        {lang === 'en' ? 'Add story-order metric' : 'הוספת מדד סדר סיפורים'}
+                    </button>
+                    {useOrder && (
+                        <label className="flex items-center gap-1 px-1 text-[10px] text-slate-500">
+                            <span>{lang === 'en' ? 'weight' : 'משקל'}</span>
+                            <input type="range" min="0.1" max="1" step="0.05" value={orderWeight}
+                                onChange={e => setOrderWeight(Number(e.target.value))} className="w-20" />
+                            <span>{orderWeight.toFixed(2)}</span>
+                        </label>
+                    )}
+                </div>
+
+                <button
+                    onClick={() => setShowMethod(v => !v)}
+                    className="text-[11px] px-2 py-1 rounded border border-slate-300 bg-white text-slate-600 hover:bg-slate-50">
+                    {lang === 'en' ? 'What is this?' : 'מה זה ואיך עשינו את זה?'}
+                </button>
+
+                <span className="text-[10px] text-slate-500 bg-white border border-slate-200 rounded px-1.5 py-0.5">
+                    {lang === 'en' ? 'clusters' : 'אשכולות'}: {stats.communityCount}
+                </span>
+                <span className="text-[10px] text-slate-500 bg-white border border-slate-200 rounded px-1.5 py-0.5">
+                    {lang === 'en' ? 'visible links' : 'קשרים גלויים'}: {stats.edgeCount}
+                </span>
+                <span className="text-[10px] text-slate-500 bg-white border border-slate-200 rounded px-1.5 py-0.5">
+                    {lang === 'en' ? 'candidate links' : 'קשרים אפשריים'}: {stats.totalPairs}
+                </span>
+                <div className="flex flex-wrap gap-2 items-center mr-auto">
+                    {Object.values(commInfo)
+                        .sort((a, b) => a.id - b.id)
+                        .map(c => (
+                            <span key={c.id} className="flex items-center gap-1 text-[10px] text-slate-600">
+                                <span className="w-2.5 h-2.5 rounded-full inline-block shrink-0" style={{ background: c.color }} />
+                                {c.members.length}
+                            </span>
+                        ))}
+                </div>
+            </div>
+
+            <div
+                className="flex-1 overflow-hidden relative"
+                onMouseDown={e => {
+                    panRef.current = {
+                        x: e.clientX,
+                        y: e.clientY,
+                        tx: viewState.tx,
+                        ty: viewState.ty,
+                    };
+                    setIsPanning(true);
+                }}
+                onMouseUp={() => setIsPanning(false)}
+                onWheel={e => {
+                    e.preventDefault();
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const px = e.clientX - rect.left;
+                    const py = e.clientY - rect.top;
+                    setViewState(prev => {
+                        const factor = e.deltaY < 0 ? 1.12 : (1 / 1.12);
+                        const nextScale = Math.max(0.65, Math.min(2.4, prev.scale * factor));
+                        const wx = (px - prev.tx) / prev.scale;
+                        const wy = (py - prev.ty) / prev.scale;
+                        return {
+                            scale: nextScale,
+                            tx: px - wx * nextScale,
+                            ty: py - wy * nextScale,
+                        };
+                    });
+                }}
+                onMouseMove={e => {
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    setTipPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+                    if (isPanning && panRef.current) {
+                        setViewState(prev => ({
+                            ...prev,
+                            tx: panRef.current.tx + (e.clientX - panRef.current.x),
+                            ty: panRef.current.ty + (e.clientY - panRef.current.y),
+                        }));
+                    }
+                }}
+                onMouseLeave={() => { setHoveredIdx(null); setIsPanning(false); }}
+                style={{ cursor: isPanning ? 'grabbing' : 'grab' }}>
+                <svg viewBox={`0 0 ${W} ${H}`} width="100%" height="100%" className="bg-[radial-gradient(circle_at_16%_16%,#f8fafc,#ffffff_38%,#eef2ff)]" style={{ display: 'block' }}>
+                    <g transform={`translate(${viewState.tx} ${viewState.ty}) scale(${viewState.scale})`}>
+                    {visiblePairs.map(({ i, j, sim }) => {
+                        const p1 = positions[i];
+                        const p2 = positions[j];
+                        if (!p1 || !p2) return null;
+                        return (
+                            <line
+                                key={`ln-${i}-${j}`}
+                                x1={p1.x}
+                                y1={p1.y}
+                                x2={p2.x}
+                                y2={p2.y}
+                                stroke="rgba(100,116,139,0.22)"
+                                strokeWidth={0.5 + sim * 1.1}
+                                strokeLinecap="round"
+                            />
+                        );
+                    })}
+
+                    {renderMode === 'works' && connectionVertices.map((e, idx) => {
+                        const a = positions[e.i];
+                        const b = positions[e.j];
+                        if (!a || !b) return null;
+                        const size = 3 + e.sim * 3;
+                        return (
+                            <g key={`vx-${idx}`}>
+                                <line x1={a.x} y1={a.y} x2={e.x} y2={e.y} stroke="rgba(100,116,139,0.2)" strokeWidth="0.6" />
+                                <line x1={b.x} y1={b.y} x2={e.x} y2={e.y} stroke="rgba(100,116,139,0.2)" strokeWidth="0.6" />
+                                <rect x={e.x - size / 2} y={e.y - size / 2} width={size} height={size} rx="1.2" fill="rgba(15,23,42,0.28)" />
+                                <text
+                                    x={e.x + 5}
+                                    y={e.y - 4}
+                                    fontSize={Math.max(6.2, 7 / Math.max(1, viewState.scale))}
+                                    fontFamily="Assistant, sans-serif"
+                                    fill="#64748b"
+                                    opacity="0.9"
+                                    style={{ pointerEvents: 'none' }}>
+                                    {e.label.length > 22 ? e.label.slice(0, 22) + '…' : e.label}
+                                </text>
+                            </g>
+                        );
+                    })}
+
+                    {positions.map((p, i) => {
+                        if (!p) return null;
+                        const ms = mssData[i];
+                        const isHover = hoveredIdx === i;
+                        const isSelected = selectedIdx === i;
+                        const color = nodeColor(i);
+                        const label = `${shortLib(ms.library || '').trim() || ms.library}${ms.number ? ` · ${ms.number}` : ''}`;
+                        return (
+                            <g
+                                key={ms.id}
+                                transform={`translate(${p.x},${p.y})`}
+                                onMouseEnter={() => setHoveredIdx(i)}
+                                onMouseLeave={() => setHoveredIdx(null)}
+                                onClick={() => setSelectedIdx(prev => prev === i ? null : i)}
+                                style={{ cursor: 'pointer' }}>
+                                <circle r={NODE_R + (isSelected ? 3.6 : isHover ? 2.2 : 0)} fill={color} opacity={isSelected ? 0.26 : 0.16} />
+                                <circle r={NODE_R} fill={color} stroke="white" strokeWidth="1" opacity="0.88" />
+                                <text
+                                    x={7}
+                                    y={-6}
+                                    fontSize={(isHover || isSelected ? 1.14 : 1) * labelFontSize(viewState.scale)}
+                                    fontFamily="Assistant, sans-serif"
+                                    fontWeight={isHover || isSelected ? 600 : 500}
+                                    fill={isHover || isSelected ? '#0f172a' : '#475569'}
+                                    stroke="rgba(255,255,255,0.95)"
+                                    strokeWidth="2.3"
+                                    paintOrder="stroke"
+                                    opacity={0.95}
+                                    style={{ pointerEvents: 'none' }}>
+                                    {label.length > 28 ? label.slice(0, 28) + '…' : label}
+                                </text>
+                            </g>
+                        );
+                    })}
+                    </g>
+                </svg>
+
+                {hoveredMs && (
+                    <div
+                        className="pointer-events-none absolute z-50 bg-white/95 backdrop-blur rounded-xl shadow-xl border border-slate-100 px-3 py-2.5 text-xs"
+                        style={{
+                            left: tipPos.x + 16,
+                            top: tipPos.y - 14,
+                            maxWidth: 280,
+                            borderTop: `3px solid ${nodeColor(hoveredIdx)}`,
+                        }}>
+                        <div className="font-semibold text-slate-800 leading-snug">{hoveredMs.library}</div>
+                        {hoveredMs.number && <div className="text-slate-500 text-[10px] mt-0.5">{hoveredMs.number}</div>}
+                        <div className="text-slate-400 text-[10px] mt-1">
+                            {hoveredMs.year ? `${lang === 'en' ? 'Year' : 'שנה'}: ${hoveredMs.year}` : ''}
+                            {hoveredMs.century ? ` · ${lang === 'en' ? 'Century' : 'מאה'}: ${hoveredMs.century}` : ''}
+                            {hoveredMs.scriptType ? ` · ${lang === 'en' ? 'Script' : 'כתיבה'}: ${hoveredMs.scriptType}` : ''}
+                        </div>
+                    </div>
+                )}
+
+                {selectedMs && (
+                    <div className="absolute top-3 left-3 w-[320px] max-h-[88%] overflow-auto z-40 rounded-xl border border-slate-200 bg-white/95 backdrop-blur shadow-lg">
+                        <div className="px-3 py-2 border-b border-slate-100 bg-slate-50 sticky top-0">
+                            <div className="text-[10px] text-slate-400 uppercase tracking-wide">{lang === 'en' ? 'Selected manuscript' : 'כתב יד נבחר'}</div>
+                            <div className="text-sm font-semibold text-slate-800 mt-0.5 leading-snug">{selectedMs.library}</div>
+                            <div className="text-[11px] text-slate-500">{selectedMs.number}</div>
+                        </div>
+                        <div className="px-3 py-2 border-b border-slate-100 text-[11px] text-slate-600">
+                            {lang === 'en' ? 'Nearest manuscripts by weighted proximity' : 'כתבי יד קרובים לפי מדד קרבה משוקלל'}
+                        </div>
+                        <div className="p-2 space-y-2">
+                            {selectedNeighbours.length === 0 ? (
+                                <div className="text-[11px] text-slate-400 p-2">{lang === 'en' ? 'No similar manuscripts under current setup.' : 'לא נמצאו כתבי יד קרובים בהגדרות הנוכחיות.'}</div>
+                            ) : selectedNeighbours.map(row => (
+                                <div key={row.idx} className="rounded-lg border border-slate-200 bg-white p-2">
+                                    <div className="flex items-center justify-between gap-2">
+                                        <div>
+                                            <div className="text-[11px] font-semibold text-slate-800 leading-tight">{shortLib(row.ms.library)}</div>
+                                            <div className="text-[10px] text-slate-500">{row.ms.number}</div>
+                                        </div>
+                                        <span className={`text-[10px] rounded px-1.5 py-0.5 ${row.sim > 0.82 ? 'bg-emerald-100 text-emerald-700' : row.sim > 0.62 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>
+                                            {Math.round(row.sim * 100)}%
+                                        </span>
+                                    </div>
+                                    <div className="mt-1 text-[10px] text-slate-500" dir="ltr">
+                                        inventory {Math.round(row.inv * 100)}%
+                                        {useBiblio ? ` · biblio ${row.bio == null ? 'N/A' : Math.round(row.bio * 100) + '%'}` : ''}
+                                        {useOrder ? ` · order ${row.ord == null ? 'N/A' : Math.round(row.ord * 100) + '%'}` : ''}
+                                    </div>
+                                    {row.identicalInventory && (
+                                        <div className="mt-1 text-[10px] inline-block rounded px-1.5 py-0.5 bg-indigo-100 text-indigo-700">
+                                            {lang === 'en' ? 'Identical inventory profile' : 'זהה במצאי החיבורים'}
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {showMethod && (
+                    <div className="absolute top-3 right-3 z-40 w-[340px] rounded-xl border border-slate-200 bg-white shadow-lg p-3 text-[11px] text-slate-600 leading-relaxed">
+                        <div className="font-semibold text-slate-800 mb-1">{lang === 'en' ? 'How this works' : 'מה זה ואיך עשינו את זה'}</div>
+                        <div>
+                            {lang === 'en'
+                                ? 'Each circle is a manuscript. Link score is based on shared works (Jaccard), optionally enriched with bibliographic similarity and story-order similarity using the sliders. In "Include work names" mode, square markers represent shared-work connectors between manuscript pairs.'
+                                : 'כל עיגול הוא כתב יד. ציון הקשר מבוסס על חפיפת חיבורים (Jaccard), וניתן להעשיר אותו בפרטים ביבליוגרפיים ובמדד סדר סיפורים באמצעות הסליידרים. במצב "כולל שמות חיבורים" ריבועים קטנים מייצגים צמתי-קשר בין זוגות כתבי יד עם תווית חיבורים משותפים.'}
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            <div className="px-3 py-2 border-t border-slate-200 bg-slate-50 text-[11px] text-slate-500 leading-relaxed">
+                {lang === 'en'
+                    ? 'Names are always visible (library + shelfmark). Mouse wheel zooms in/out; drag to pan. Set threshold to 0 to hide lines, then increase to reveal stronger links.'
+                    : 'שמות כתבי היד מוצגים תמיד (ספרייה + מספר מדף). גלילת עכבר מבצעת זום וגרירה מזיזה את המפה. כאשר הסף 0 הקווים מוסתרים, וככל שמעלים את הסף מוצגים קשרים חזקים יותר.'}
+            </div>
+        </div>
+    );
+}
+
+/* ═══════════════════════════════════════════════════════════
+   TAB 2 — STORY ORDER MATRIX
+
+   Rows = canonical story numbers (צרפתי), sorted 1…N
+   Columns = each MS that appears in the Igeret data
+   Cell value = position of that story in that specific MS
+               (מספר סדר בכתב היד),  "·" = absent
+═══════════════════════════════════════════════════════════ */
+function StoryOrderTab({ orderData, lang, onOpenTextStory, storiesWithFullText = [] }) {
+    const [search, setSearch] = useState('');
+    const [sortKey, setSortKey] = useState('storyNum');
+    const [sortDir, setSortDir] = useState('asc');
+    const [weightOrder, setWeightOrder] = useState(0.55);
+    const [weightCoverage, setWeightCoverage] = useState(0.30);
+    const [weightAdditions, setWeightAdditions] = useState(0.15);
+    const [additionsPenaltyStrength, setAdditionsPenaltyStrength] = useState(1);
+
+    const msList = useMemo(() => {
+        const seen = new Set();
+        const out = [];
+        orderData.forEach(r => {
+            const key = msKey(r.library, r.number);
+            if (!r.library && !r.number) return;
+            if (seen.has(key)) return;
+            seen.add(key);
+            out.push({ key, library: r.library, number: r.number });
+        });
+        out.sort((a, b) => (a.library || '').localeCompare(b.library || '', 'he') || (a.number || '').localeCompare(b.number || '', 'he'));
+        return out;
+    }, [orderData]);
+
+    const shownMs = useMemo(() => {
+        if (!search) return msList;
+        const q = search.toLowerCase();
+        return msList.filter(ms =>
+            (ms.library || '').toLowerCase().includes(q) ||
+            (ms.number || '').toLowerCase().includes(q)
+        );
+    }, [msList, search]);
+
+    const storyNameByNum = useMemo(() => {
+        const m = {};
+        orderData.forEach(r => {
+            if (r.sarfattiNum == null || r.sarfattiNum <= 0) return;
+            const name = (r.storyName || r.storyNameRaw || r.incipit || '').trim();
+            if (!name) return;
+            if (!m[r.sarfattiNum]) m[r.sarfattiNum] = name;
+        });
+        return m;
+    }, [orderData]);
+
+    const canonStories = useMemo(() => {
+        const nums = [...new Set(orderData.map(r => r.sarfattiNum).filter(n => n != null && n > 0))]
+            .sort((a, b) => a - b);
+        return nums.map(num => ({ num, name: storyNameByNum[num] || `${lang === 'en' ? 'Story' : 'סיפור'} ${num}` }));
+    }, [orderData, storyNameByNum, lang]);
+
+    const matrix = useMemo(() => {
+        const m = {};
+        orderData.forEach(r => {
+            if (r.sarfattiNum == null || r.sarfattiNum <= 0) return;
+            if (!m[r.sarfattiNum]) m[r.sarfattiNum] = {};
+            m[r.sarfattiNum][msKey(r.library, r.number)] = {
+                msOrder: r.msOrder,
+                folio: r.folio,
+                note: r.note,
+                storyName: r.storyName,
+                incipit: r.incipit,
+            };
+        });
+        return m;
+    }, [orderData]);
+
+    const orderVectors = useMemo(() => {
+        const out = {};
+        orderData.forEach(r => {
+            if (r.sarfattiNum == null || r.sarfattiNum <= 0 || r.msOrder == null) return;
+            const key = msKey(r.library, r.number);
+            if (!out[key]) out[key] = {};
+            out[key][r.sarfattiNum] = r.msOrder;
+        });
+        return out;
+    }, [orderData]);
+
+    const baseline = useMemo(() => {
+        const b = {};
+        canonStories.forEach(s => { b[s.num] = s.num; });
+        return b;
+    }, [canonStories]);
+
+    const additionsByMs = useMemo(() => {
+        const m = {};
+        orderData.forEach(r => {
+            const key = msKey(r.library, r.number);
+            if (!m[key]) m[key] = [];
+            if (r.sarfattiNum != null && r.sarfattiNum > 0) return;
+            m[key].push(r);
+        });
+        return m;
+    }, [orderData]);
+
+    const maxAdditions = useMemo(() => {
+        return Math.max(1, ...Object.values(additionsByMs).map(arr => arr.length));
+    }, [additionsByMs]);
+
+    const msMetrics = useMemo(() => {
+        const wSum = Math.max(0.0001, weightOrder + weightCoverage + weightAdditions);
+        return shownMs.map(ms => {
+            const vec = orderVectors[ms.key] || {};
+            const rel = orderSimilarity(vec, baseline);
+            const coverage = canonStories.length ? rel.overlap / canonStories.length : 0;
+            const additions = additionsByMs[ms.key]?.length || 0;
+            const additionsPenalty = Math.min(1, (additions / maxAdditions) * additionsPenaltyStrength);
+            const additionsScore = 1 - additionsPenalty;
+            const weighted = (
+                (weightOrder * rel.similarity) +
+                (weightCoverage * coverage) +
+                (weightAdditions * additionsScore)
+            ) / wSum;
+            return {
+                ...ms,
+                orderSim: rel.similarity,
+                overlap: rel.overlap,
+                coverage,
+                additions,
+                additionsScore,
+                weighted,
+            };
+        }).sort((a, b) => b.weighted - a.weighted || b.orderSim - a.orderSim || (a.library || '').localeCompare(b.library || '', 'he'));
+    }, [shownMs, orderVectors, baseline, canonStories.length, additionsByMs, maxAdditions, additionsPenaltyStrength, weightOrder, weightCoverage, weightAdditions]);
+
+    const storyRows = useMemo(() => {
+        return canonStories.map(st => {
+            let presentCount = 0;
+            let absDeltaSum = 0;
+            let maxAbsDelta = 0;
+            const cellsByMs = {};
+
+            shownMs.forEach(ms => {
+                const cell = matrix[st.num]?.[ms.key] || null;
+                const msOrder = cell?.msOrder ?? null;
+                const delta = msOrder == null ? null : (msOrder - st.num);
+                if (msOrder != null) {
+                    presentCount += 1;
+                    const ad = Math.abs(delta || 0);
+                    absDeltaSum += ad;
+                    if (ad > maxAbsDelta) maxAbsDelta = ad;
+                }
+                cellsByMs[ms.key] = {
+                    msOrder,
+                    delta,
+                    folio: cell?.folio || '',
+                    note: cell?.note || '',
+                    incipit: cell?.incipit || '',
+                };
+            });
+
+            const coverage = shownMs.length ? presentCount / shownMs.length : 0;
+            const avgAbsDelta = presentCount ? absDeltaSum / presentCount : null;
+            return {
+                num: st.num,
+                name: st.name,
+                cellsByMs,
+                presentCount,
+                coverage,
+                avgAbsDelta,
+                maxAbsDelta,
+            };
+        });
+    }, [canonStories, shownMs, matrix]);
+
+    const sortedStoryRows = useMemo(() => {
+        const rows = [...storyRows];
+        const dir = sortDir === 'asc' ? 1 : -1;
+        rows.sort((a, b) => {
+            let cmp = 0;
+
+            if (sortKey === 'storyNum') {
+                cmp = a.num - b.num;
+            } else if (sortKey === 'storyName') {
+                cmp = a.name.localeCompare(b.name, 'he');
+            } else if (sortKey === 'coverage') {
+                cmp = a.coverage - b.coverage;
+            } else if (sortKey === 'avgAbsDelta') {
+                const av = a.avgAbsDelta == null ? Number.POSITIVE_INFINITY : a.avgAbsDelta;
+                const bv = b.avgAbsDelta == null ? Number.POSITIVE_INFINITY : b.avgAbsDelta;
+                cmp = av - bv;
+            } else if (sortKey.startsWith('ms:')) {
+                const key = sortKey.slice(3);
+                const av = a.cellsByMs[key]?.msOrder;
+                const bv = b.cellsByMs[key]?.msOrder;
+                const aMissing = av == null;
+                const bMissing = bv == null;
+                if (aMissing && bMissing) cmp = 0;
+                else if (aMissing) cmp = 1;
+                else if (bMissing) cmp = -1;
+                else cmp = av - bv;
+                cmp *= dir;
+                if (cmp !== 0) return cmp;
+                return a.num - b.num;
+            }
+
+            cmp *= dir;
+            if (cmp !== 0) return cmp;
+            return a.num - b.num;
+        });
+        return rows;
+    }, [storyRows, sortKey, sortDir]);
+
+    const additionsSummary = useMemo(() => {
+        return shownMs.map(ms => ({
+            ...ms,
+            additions: additionsByMs[ms.key]?.length || 0,
+        })).sort((a, b) => b.additions - a.additions || (a.library || '').localeCompare(b.library || '', 'he'));
+    }, [shownMs, additionsByMs]);
+
+    const toggleSort = key => {
+        if (sortKey === key) {
+            setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+            return;
+        }
+        setSortKey(key);
+        setSortDir('asc');
+    };
+
+    const sortMark = key => {
+        if (sortKey !== key) return '↕';
+        return sortDir === 'asc' ? '▲' : '▼';
+    };
+
+    const deltaCellStyle = delta => {
+        if (delta == null) return 'bg-slate-50 text-slate-300';
+        const ad = Math.abs(delta);
+        if (ad >= 5) return 'bg-rose-300 text-rose-900 ring-1 ring-rose-400';
+        if (ad >= 3) return 'bg-rose-200 text-rose-800 ring-1 ring-rose-300';
+        if (ad === 0) return 'bg-emerald-100 text-emerald-800';
+        return 'bg-amber-100 text-amber-800';
+    };
+
+    const fullTextStoriesSet = useMemo(() => new Set(storiesWithFullText || []), [storiesWithFullText]);
+
+    if (!orderData.length) return (
+        <div className="flex items-center justify-center h-full text-slate-400 text-sm">
+            אין נתוני סדר סיפורים זמינים
+        </div>
+    );
+
+    return (
+        <div className="flex flex-col h-full overflow-hidden">
+            <div className="px-3 py-2 border-b border-slate-200 bg-slate-50 flex flex-wrap gap-2 items-center shrink-0">
+                <input
+                    className="border border-slate-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 min-w-[220px] bg-white flex-1"
+                    placeholder={lang === 'en' ? 'Filter manuscripts...' : 'סנן כתבי יד...'}
+                    value={search}
+                    onChange={e => setSearch(e.target.value)}
+                />
+                <span className="text-[11px] text-slate-500">
+                    {lang === 'en'
+                        ? 'Wide view: all manuscripts appear as columns. Click any column header to sort.'
+                        : 'תצוגה רחבה: כל כתבי היד מופיעים כעמודות. לחיצה על כותרת עמודה ממיינת.'}
+                </span>
+            </div>
+
+            <div className="px-3 py-2 border-b border-slate-200 bg-blue-50 text-xs text-slate-600 leading-relaxed shrink-0">
+                <strong>{lang === 'en' ? 'Baseline:' : 'בסיס:'}</strong>{' '}
+                {lang === 'en'
+                    ? 'Sarfatti story numbering and names. Every manuscript is compared to this baseline to show story migration, omissions, and additions.'
+                    : 'מספור ושמות הסיפורים אצל צרפתי. כל כתב יד מושווה לבסיס הזה כדי לראות נדידת סיפורים, השמטות ותוספות.'}
+            </div>
+
+            <div className="overflow-auto flex-1 p-3 space-y-3">
+                <div className="rounded-xl border border-slate-200 overflow-auto bg-white">
+                    <table className="text-xs border-collapse" style={{ minWidth: `${Math.max(980, 420 + shownMs.length * 90)}px` }}>
+                        <thead className="sticky top-0 z-20 bg-slate-800 text-white">
+                            <tr>
+                                <th className="px-2 py-2 text-center border-l border-slate-600 min-w-[52px] sticky right-0 z-30 bg-slate-900">
+                                    <button onClick={() => toggleSort('storyNum')} className="w-full text-center">
+                                        # {sortMark('storyNum')}
+                                    </button>
+                                </th>
+                                <th className="px-3 py-2 text-right border-l border-slate-600 min-w-[230px] sticky right-[52px] z-30 bg-slate-900">
+                                    <button onClick={() => toggleSort('storyName')} className="w-full text-right">
+                                        {lang === 'en' ? 'Sarfatti story name' : 'שם הסיפור אצל צרפתי'} {sortMark('storyName')}
+                                    </button>
+                                </th>
+                                <th className="px-2 py-2 text-center border-l border-slate-600 min-w-[76px] sticky right-[282px] z-30 bg-slate-900">
+                                    <button onClick={() => toggleSort('coverage')} className="w-full text-center">
+                                        {lang === 'en' ? 'Coverage' : 'כיסוי'} {sortMark('coverage')}
+                                    </button>
+                                </th>
+                                <th className="px-2 py-2 text-center border-l border-slate-600 min-w-[76px] sticky right-[358px] z-30 bg-slate-900">
+                                    <button onClick={() => toggleSort('avgAbsDelta')} className="w-full text-center">
+                                        |Δ| {sortMark('avgAbsDelta')}
+                                    </button>
+                                </th>
+                                {shownMs.map(ms => (
+                                    <th key={`h-${ms.key}`} className="px-1.5 py-2 text-center border-l border-slate-600 min-w-[90px]">
+                                        <button onClick={() => toggleSort(`ms:${ms.key}`)} className="w-full text-center">
+                                            <div className="text-[10px] leading-tight">{shortLib(ms.library)}</div>
+                                            <div className="text-[9px] text-slate-300 mt-0.5">{ms.number}</div>
+                                            <div className="text-[10px] mt-0.5">{sortMark(`ms:${ms.key}`)}</div>
+                                        </button>
+                                    </th>
+                                ))}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {sortedStoryRows.map(row => {
+                                const hasFullText = fullTextStoriesSet.has(row.num);
+                                return (
+                                    <tr key={row.num} className="border-b border-slate-100 hover:bg-indigo-50">
+                                        <td className="px-2 py-1.5 text-center text-slate-600 font-mono border-l border-slate-100 sticky right-0 z-10 bg-white">{row.num}</td>
+                                        <td className="px-3 py-1.5 text-right heb border-l border-slate-100 sticky right-[52px] z-10 bg-white">
+                                            <div>{row.name}</div>
+                                            {hasFullText && (
+                                                <button
+                                                    onClick={() => onOpenTextStory && onOpenTextStory(row.num)}
+                                                    className="text-[10px] text-indigo-600 hover:text-indigo-800 hover:underline mt-0.5"
+                                                    title={lang === 'en' ? 'Open full text in Texts tab' : 'פתח טקסט מלא בלשונית הטקסטים'}>
+                                                    {lang === 'en' ? 'Full text' : 'לטקסט המלא'}
+                                                </button>
+                                            )}
+                                        </td>
+                                        <td className="px-2 py-1.5 text-center border-l border-slate-100 text-slate-600 sticky right-[282px] z-10 bg-white">
+                                            {row.presentCount}/{shownMs.length}
+                                        </td>
+                                        <td className="px-2 py-1.5 text-center border-l border-slate-100 text-slate-700 sticky right-[358px] z-10 bg-white">
+                                            {row.avgAbsDelta == null ? '·' : row.avgAbsDelta.toFixed(1)}
+                                        </td>
+                                        {shownMs.map(ms => {
+                                            const cell = row.cellsByMs[ms.key];
+                                            const cls = deltaCellStyle(cell.delta);
+                                            const deltaText = cell.delta == null ? '·' : (cell.delta > 0 ? `+${cell.delta}` : `${cell.delta}`);
+                                            const tip = cell.msOrder == null
+                                                ? ''
+                                                : `${lang === 'en' ? 'Order' : 'מיקום'}: ${cell.msOrder} | Δ ${deltaText}${cell.folio ? ` | ${lang === 'en' ? 'Folio' : 'עמוד'}: ${cell.folio}` : ''}${cell.note ? ` | ${cell.note}` : ''}`;
+                                            return (
+                                                <td key={`${row.num}-${ms.key}`} className="px-1 py-1.5 text-center border-l border-slate-100" title={tip}>
+                                                    <div className={`rounded px-1 py-0.5 ${cls}`}>
+                                                        <div className="font-semibold leading-tight">{cell.msOrder ?? '·'}</div>
+                                                        <div className="text-[9px] leading-tight">{deltaText}</div>
+                                                    </div>
+                                                </td>
+                                            );
+                                        })}
+                                    </tr>
+                                );
+                            })}
+                            {shownMs.length === 0 && (
+                                <tr>
+                                    <td colSpan={Math.max(4, 4 + shownMs.length)} className="px-3 py-4 text-center text-slate-400">
+                                        {lang === 'en' ? 'No manuscripts match the filter.' : 'אין כתבי יד התואמים את הסינון.'}
+                                    </td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                    <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+                        <div className="border-b border-slate-100 bg-white overflow-x-auto">
+                            <div className="grid grid-cols-4 gap-2 p-2 min-w-[980px] text-[11px]">
+                                <div className="rounded-lg border border-slate-200 px-2.5 py-2 bg-slate-50">
+                                    <div className="text-slate-500 mb-1">{lang === 'en' ? 'Weight: story order' : 'משקל: סדר סיפורים'}</div>
+                                    <div className="flex items-center gap-2">
+                                        <input type="range" min="0" max="1" step="0.05" value={weightOrder} onChange={e => setWeightOrder(Number(e.target.value))} className="w-full" />
+                                        <span className="font-mono text-slate-700">{weightOrder.toFixed(2)}</span>
+                                    </div>
+                                </div>
+                                <div className="rounded-lg border border-slate-200 px-2.5 py-2 bg-slate-50">
+                                    <div className="text-slate-500 mb-1">{lang === 'en' ? 'Weight: coverage of Sarfatti stories' : 'משקל: כיסוי סיפורי צרפתי'}</div>
+                                    <div className="flex items-center gap-2">
+                                        <input type="range" min="0" max="1" step="0.05" value={weightCoverage} onChange={e => setWeightCoverage(Number(e.target.value))} className="w-full" />
+                                        <span className="font-mono text-slate-700">{weightCoverage.toFixed(2)}</span>
+                                    </div>
+                                </div>
+                                <div className="rounded-lg border border-slate-200 px-2.5 py-2 bg-slate-50">
+                                    <div className="text-slate-500 mb-1">{lang === 'en' ? 'Weight: additional/non-canonical stories' : 'משקל: סיפורים נוספים/לא-קנוניים'}</div>
+                                    <div className="flex items-center gap-2">
+                                        <input type="range" min="0" max="1" step="0.05" value={weightAdditions} onChange={e => setWeightAdditions(Number(e.target.value))} className="w-full" />
+                                        <span className="font-mono text-slate-700">{weightAdditions.toFixed(2)}</span>
+                                    </div>
+                                </div>
+                                <div className="rounded-lg border border-slate-200 px-2.5 py-2 bg-slate-50">
+                                    <div className="text-slate-500 mb-1">{lang === 'en' ? 'Additions penalty strength' : 'עוצמת קנס על תוספות'}</div>
+                                    <div className="flex items-center gap-2">
+                                        <input type="range" min="0" max="2" step="0.1" value={additionsPenaltyStrength} onChange={e => setAdditionsPenaltyStrength(Number(e.target.value))} className="w-full" />
+                                        <span className="font-mono text-slate-700">{additionsPenaltyStrength.toFixed(1)}</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="px-3 py-2 border-b border-slate-100 bg-slate-50 text-[11px] text-slate-600">
+                            {lang === 'en' ? 'Manuscript similarity to Sarfatti baseline' : 'דמיון כתבי יד לבסיס צרפתי'}
+                        </div>
+                        <div className="max-h-[250px] overflow-auto">
+                            <table className="w-full text-[11px] border-collapse">
+                                <thead className="bg-slate-100 text-slate-600">
+                                    <tr>
+                                        <th className="px-2 py-1.5 text-right">{lang === 'en' ? 'Manuscript' : 'כתב יד'}</th>
+                                        <th className="px-2 py-1.5 text-center">{lang === 'en' ? 'Weighted' : 'משוקלל'}</th>
+                                        <th className="px-2 py-1.5 text-center">{lang === 'en' ? 'Order' : 'סדר'}</th>
+                                        <th className="px-2 py-1.5 text-center">{lang === 'en' ? 'Coverage' : 'כיסוי'}</th>
+                                        <th className="px-2 py-1.5 text-center">+add</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {msMetrics.map(ms => (
+                                        <tr key={`metric-${ms.key}`} className="border-b border-slate-100">
+                                            <td className="px-2 py-1.5 text-right text-slate-700">{shortLib(ms.library)} ({ms.number})</td>
+                                            <td className="px-2 py-1.5 text-center font-semibold text-slate-800">{Math.round(ms.weighted * 100)}%</td>
+                                            <td className="px-2 py-1.5 text-center text-slate-600">{Math.round(ms.orderSim * 100)}%</td>
+                                            <td className="px-2 py-1.5 text-center text-slate-600">{Math.round(ms.coverage * 100)}%</td>
+                                            <td className="px-2 py-1.5 text-center text-slate-600">{ms.additions}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+                        <div className="px-3 py-2 border-b border-slate-100 bg-slate-50 text-[11px] text-slate-600">
+                            {lang === 'en' ? 'Additional / non-canonical stories by manuscript' : 'סיפורים נוספים/לא-קנוניים לפי כתב יד'}
+                        </div>
+                        <div className="max-h-[250px] overflow-auto">
+                            <table className="w-full text-[11px] border-collapse">
+                                <thead className="bg-slate-100 text-slate-600">
+                                    <tr>
+                                        <th className="px-2 py-1.5 text-right">{lang === 'en' ? 'Manuscript' : 'כתב יד'}</th>
+                                        <th className="px-2 py-1.5 text-center">{lang === 'en' ? 'Additions count' : 'כמות תוספות'}</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {additionsSummary.map(ms => (
+                                        <tr key={`addsum-${ms.key}`} className="border-b border-slate-100">
+                                            <td className="px-2 py-1.5 text-right text-slate-700">{shortLib(ms.library)} ({ms.number})</td>
+                                            <td className="px-2 py-1.5 text-center text-slate-600">{ms.additions}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+/* ═══════════════════════════════════════════════════════════
+   TAB 3 — TEXT COMPARISON
+
+   Left sidebar: list of stories by canonical number
+   Right: texts of the selected story from all MSS
+═══════════════════════════════════════════════════════════ */
+function TextsTab({ textsData, textsAudit, orderData, lang, jumpStory }) {
+    const [textsInnerTab, setTextsInnerTab] = useState('stories'); // stories | map
+    const [treeBasis, setTreeBasis] = useState('story'); // story | global | delta
+    const [selectedStory, setSelectedStory] = useState(null);
+    const [selectedKeys, setSelectedKeys] = useState([]);
+    const [baseSynopsisKey, setBaseSynopsisKey] = useState('');
+    const [treeZoom, setTreeZoom] = useState(1);
+    const [msReadKey, setMsReadKey] = useState('');
+    const [selectedSegIdx, setSelectedSegIdx] = useState(null);
+
+    const storyNames = useMemo(() => {
+        const m = {};
+        orderData.forEach(r => {
+            if (r.sarfattiNum == null) return;
+            const name = (r.storyName || r.storyNameRaw || r.incipit || '').trim();
+            if (!name) return;
+            if (!m[r.sarfattiNum]) m[r.sarfattiNum] = name;
+        });
+        return m;
+    }, [orderData]);
+
+    const storyNums = useMemo(() =>
+        [...new Set(textsData.map(t => t.storyNum).filter(n => n != null))].sort((a, b) => a - b),
+    [textsData]);
+
+    const msList = useMemo(() => {
+        const seen = new Set();
+        const out = [];
+        textsData.forEach(t => {
+            const key = msKey(t.library, t.number);
+            if (seen.has(key)) return;
+            seen.add(key);
+            out.push({ key, library: t.library, number: t.number });
+        });
+        return out;
+    }, [textsData]);
+
+    const auditReasonRows = useMemo(() => {
+        const r = textsAudit?.droppedReasons || {};
+        const labels = {
+            blankRow: lang === 'en' ? 'Blank rows' : 'שורות ריקות',
+            missingManuscript: lang === 'en' ? 'Missing manuscript id' : 'חסר זיהוי כתב יד',
+            missingStoryNum: lang === 'en' ? 'Missing story number' : 'חסר מספר סיפור',
+            emptyText: lang === 'en' ? 'Empty text' : 'טקסט ריק',
+        };
+        return Object.keys(labels)
+            .map(k => ({ key: k, label: labels[k], count: Number(r[k] || 0) }))
+            .filter(x => x.count > 0);
+    }, [textsAudit, lang]);
+
+    useEffect(() => {
+        setSelectedKeys(prev => {
+            const valid = prev.filter(k => msList.some(m => m.key === k));
+            if (valid.length) return valid;
+            return msList.slice(0, Math.min(4, msList.length)).map(m => m.key);
+        });
+    }, [msList]);
+
+    useEffect(() => {
+        if (selectedStory == null && storyNums.length) setSelectedStory(storyNums[0]);
+    }, [selectedStory, storyNums]);
+
+    useEffect(() => {
+        if (textsInnerTab === 'stories') setTreeBasis('story');
+    }, [textsInnerTab, selectedStory]);
+    useEffect(() => {
+        if (textsInnerTab === 'map') setTreeBasis('global');
+    }, [textsInnerTab]);
+
+    useEffect(() => {
+        if (jumpStory == null) return;
+        const target = Number(jumpStory);
+        if (!Number.isFinite(target)) return;
+        setTextsInnerTab('stories');
+        setSelectedStory(target);
+        setSelectedSegIdx(0);
+        setMsReadKey('');
+
+        const keys = [];
+        const seen = new Set();
+        textsData.forEach(t => {
+            if (t.storyNum !== target) return;
+            if (!String(t.text || '').trim()) return;
+            const key = msKey(t.library, t.number);
+            if (seen.has(key)) return;
+            seen.add(key);
+            keys.push(key);
+        });
+        if (keys.length) setSelectedKeys(keys);
+    }, [jumpStory, textsData]);
+
+    const textsByMs = useMemo(() => {
+        const out = {};
+        textsData.forEach(t => {
+            const key = msKey(t.library, t.number);
+            if (!out[key]) out[key] = {};
+            out[key][t.storyNum] = t.text;
+        });
+        return out;
+    }, [textsData]);
+
+    const selectedMs = useMemo(() =>
+        msList.filter(ms => selectedKeys.includes(ms.key)),
+    [msList, selectedKeys]);
+
+    const synopsisRows = useMemo(() => {
+        if (selectedStory == null) return [];
+        return selectedMs
+            .map(ms => ({
+                ...ms,
+                text: textsByMs[ms.key]?.[selectedStory] || '',
+            }))
+            .filter(x => x.text);
+    }, [selectedStory, selectedMs, textsByMs]);
+
+    useEffect(() => {
+        if (!synopsisRows.length) {
+            setBaseSynopsisKey('');
+            return;
+        }
+        if (!baseSynopsisKey || !synopsisRows.some(r => r.key === baseSynopsisKey)) {
+            setBaseSynopsisKey(synopsisRows[0].key);
+        }
+    }, [synopsisRows, baseSynopsisKey]);
+
+    const synopsisByKey = useMemo(() => {
+        const m = {};
+        synopsisRows.forEach(r => { m[r.key] = r.text; });
+        return m;
+    }, [synopsisRows]);
+
+    const synopsisSegmentsByKey = useMemo(() => {
+        const m = {};
+        synopsisRows.forEach(r => { m[r.key] = splitSynopsisText(r.text); });
+        return m;
+    }, [synopsisRows]);
+
+    const alignedSynopsisByKey = useMemo(() => {
+        const out = {};
+        if (!synopsisRows.length) return out;
+        const baseKey = baseSynopsisKey || synopsisRows[0]?.key;
+        const baseSegs = synopsisSegmentsByKey[baseKey] || [];
+        try {
+            synopsisRows.forEach(r => {
+                const segs = synopsisSegmentsByKey[r.key] || [];
+                if (r.key === baseKey) {
+                    out[r.key] = baseSegs;
+                    return;
+                }
+                out[r.key] = alignWitnessSegmentsToBase(baseSegs, segs, r.text);
+            });
+        } catch (e) {
+            // Safety net: if alignment fails, fall back to raw segmentation.
+            synopsisRows.forEach(r => {
+                out[r.key] = synopsisSegmentsByKey[r.key] || [];
+            });
+        }
+        return out;
+    }, [synopsisRows, synopsisSegmentsByKey, baseSynopsisKey]);
+
+    const alignmentAlgoLabel = useMemo(() => {
+        const hasEngine = !!window.SarfattiAlignment?.alignToBase;
+        if (lang === 'en') {
+            return hasEngine
+                ? 'Alignment: multi-pass bidirectional DP + length-based ensemble'
+                : 'Alignment: fallback DP (simple match/insert/delete scoring)';
+        }
+        return hasEngine
+            ? 'אלגוריתם אליינמנט: עוגני מילים + יישור דינמי עם פערים (Affine Gap), דמיון Jaccard'
+            : 'אלגוריתם אליינמנט: מצב חירום — יישור דינמי בסיסי';
+    }, [lang]);
+
+    const synopsisTableRows = useMemo(() => {
+        if (!synopsisRows.length) return [];
+        const baseKey = baseSynopsisKey || synopsisRows[0]?.key;
+        const baseAligned = alignedSynopsisByKey[baseKey] || [];
+        const fallbackLen = Math.max(0, ...synopsisRows.map(r => (synopsisSegmentsByKey[r.key] || []).length));
+        const rowCount = Math.max(baseAligned.length, fallbackLen);
+        return Array.from({ length: rowCount }, (_, segIdx) => ({
+            segIdx,
+            cells: synopsisRows.map(r => ({
+                key: r.key,
+                text: (alignedSynopsisByKey[r.key]?.[segIdx] ?? synopsisSegmentsByKey[r.key]?.[segIdx] ?? ''),
+            })),
+        }));
+    }, [synopsisRows, synopsisSegmentsByKey, alignedSynopsisByKey, baseSynopsisKey]);
+
+    useEffect(() => {
+        if (!synopsisTableRows.length) {
+            if (selectedSegIdx != null) setSelectedSegIdx(null);
+            return;
+        }
+        if (selectedSegIdx == null || selectedSegIdx >= synopsisTableRows.length) {
+            setSelectedSegIdx(0);
+        }
+    }, [synopsisTableRows, selectedSegIdx]);
+
+    useEffect(() => {
+        if (selectedSegIdx == null) return;
+        const el = document.querySelector(`[data-seg-idx=\"${selectedSegIdx}\"]`);
+        if (el && el.scrollIntoView) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    }, [selectedSegIdx]);
+
+    const baseFullDiff = useMemo(() => {
+        if (!baseSynopsisKey) return [];
+        const baseText = synopsisByKey[baseSynopsisKey] || '';
+        return synopsisRows
+            .filter(r => r.key !== baseSynopsisKey)
+            .map(r => {
+                const profile = textDiffProfile(baseText, r.text || '');
+                const words = wordLevelWitnessDiff(baseText, r.text || '');
+                return { ...r, ...profile, ...words };
+            })
+            .sort((a, b) => b.score - a.score);
+    }, [baseSynopsisKey, synopsisByKey, synopsisRows]);
+
+    const msSequentialRows = useMemo(() => {
+        return selectedMs.map(ms => {
+            const seq = storyNums
+                .map(num => ({ num, text: textsByMs[ms.key]?.[num] || '' }))
+                .filter(x => x.text);
+            return { ...ms, seq };
+        });
+    }, [selectedMs, storyNums, textsByMs]);
+
+    const msReadRow = useMemo(() => (
+        msSequentialRows.find(ms => ms.key === msReadKey) || null
+    ), [msSequentialRows, msReadKey]);
+
+    useEffect(() => {
+        if (msReadKey && !selectedKeys.includes(msReadKey)) setMsReadKey('');
+    }, [msReadKey, selectedKeys]);
+
+    const pairDist = useMemo(() => {
+        const dStory = {};
+        const dGlobal = {};
+        const keyAt = idx => selectedMs[idx]?.key;
+        const globalCorpus = {};
+        selectedMs.forEach(ms => {
+            globalCorpus[ms.key] = storyNums
+                .map(num => textsByMs[ms.key]?.[num] || '')
+                .filter(Boolean)
+                .join(' ');
+        });
+
+        for (let i = 0; i < selectedMs.length; i++) {
+            for (let j = i + 1; j < selectedMs.length; j++) {
+                const ki = keyAt(i), kj = keyAt(j);
+                const pairKey = `${ki}||${kj}`;
+                const storyA = selectedStory == null ? '' : (textsByMs[ki]?.[selectedStory] || '');
+                const storyB = selectedStory == null ? '' : (textsByMs[kj]?.[selectedStory] || '');
+                dStory[pairKey] = 1 - textJaccard(storyA, storyB);
+                dGlobal[pairKey] = 1 - textJaccard(globalCorpus[ki], globalCorpus[kj]);
+            }
+        }
+        return { dStory, dGlobal };
+    }, [selectedMs, selectedStory, storyNums, textsByMs]);
+
+    const mapPairwise = useMemo(() => {
+        const getDist = (ki, kj) => {
+            const pair = ki < kj ? `${ki}||${kj}` : `${kj}||${ki}`;
+            if (treeBasis === 'global') return pairDist.dGlobal[pair] ?? 1;
+            if (treeBasis === 'delta') return Math.abs((pairDist.dStory[pair] ?? 1) - (pairDist.dGlobal[pair] ?? 1));
+            return pairDist.dStory[pair] ?? 1;
+        };
+
+        return selectedMs.map((a, i) => selectedMs.map((b, j) => {
+            if (i === j) return { similarity: 1, distance: 0 };
+            const d = getDist(a.key, b.key);
+            return { similarity: Math.max(0, 1 - d), distance: d };
+        }));
+    }, [selectedMs, pairDist, treeBasis]);
+
+    const tree = useMemo(() => {
+        if (selectedMs.length < 2) return null;
+        const labels = selectedMs.map(ms => `${shortLib(ms.library)} (${ms.number})`);
+        const getDist = (i, j) => {
+            const ki = selectedMs[i].key;
+            const kj = selectedMs[j].key;
+            const pair = ki < kj ? `${ki}||${kj}` : `${kj}||${ki}`;
+            if (treeBasis === 'global') return pairDist.dGlobal[pair] ?? 1;
+            if (treeBasis === 'delta') return Math.abs((pairDist.dStory[pair] ?? 1) - (pairDist.dGlobal[pair] ?? 1));
+            return pairDist.dStory[pair] ?? 1;
+        };
+        return buildTreeFromDistance(labels, getDist);
+    }, [selectedMs, treeBasis, pairDist]);
+
+    const dendrogram = useMemo(() => {
+        if (!tree) return null;
+
+        const leaves = [];
+        const collectLeaves = node => {
+            if (!node) return;
+            if (node.label) {
+                leaves.push(node.label);
+                return;
+            }
+            collectLeaves(node.left);
+            collectLeaves(node.right);
+        };
+        collectLeaves(tree);
+
+        const leafCount = Math.max(2, leaves.length);
+        const width = Math.max(820, leafCount * 170);
+        const yTop = 30;
+        const yLeaf = 268;
+        const labelY = yLeaf + 18;
+        const height = labelY + 54;
+        const maxHeight = Math.max(0.001, tree.height || 1);
+        const yFor = h => yTop + ((maxHeight - (h || 0)) / maxHeight) * (yLeaf - yTop);
+
+        const xByLeaf = {};
+        leaves.forEach((label, idx) => {
+            xByLeaf[label] = 62 + (idx * (width - 124)) / Math.max(1, leaves.length - 1);
+        });
+
+        const branchPalette = ['#334155', '#0f766e', '#0369a1', '#6d28d9', '#be123c'];
+        const segments = [];
+        const nodes = [];
+        const labels = [];
+        const ticks = Array.from({ length: 6 }, (_, i) => {
+            const h = maxHeight - (maxHeight * i) / 5;
+            return { y: yFor(h), h };
+        });
+
+        const splitLabel = raw => {
+            const s = String(raw || '');
+            const idx = s.indexOf('(');
+            if (idx < 0) return { l1: s.slice(0, 24), l2: '' };
+            return {
+                l1: s.slice(0, idx).trim().slice(0, 24),
+                l2: s.slice(idx).trim().slice(0, 20),
+            };
+        };
+
+        const layout = (node, depth = 0) => {
+            if (node.label) {
+                const x = xByLeaf[node.label];
+                const y = yFor(0);
+                labels.push({ x, y: labelY, ...splitLabel(node.label) });
+                return { x, y };
+            }
+
+            const left = layout(node.left, depth + 1);
+            const right = layout(node.right, depth + 1);
+            const y = yFor(node.height || 0);
+            const x = (left.x + right.x) / 2;
+            const col = branchPalette[depth % branchPalette.length];
+            const w = Math.max(1.2, 2.4 - depth * 0.2);
+
+            segments.push({ x1: left.x, y1: left.y, x2: left.x, y2: y, col, w });
+            segments.push({ x1: right.x, y1: right.y, x2: right.x, y2: y, col, w });
+            segments.push({ x1: Math.min(left.x, right.x), y1: y, x2: Math.max(left.x, right.x), y2: y, col, w });
+            nodes.push({ x, y, h: node.height || 0, col });
+
+            return { x, y };
+        };
+
+        layout(tree);
+        return { width, height, ticks, segments, nodes, labels, yLeaf };
+    }, [tree]);
+
+    const toggleMs = key => {
+        setSelectedKeys(prev => prev.includes(key)
+            ? prev.filter(x => x !== key)
+            : [...prev, key]);
+    };
+
+    if (!textsData.length) return (
+        <div className="h-full flex flex-col items-center justify-center gap-2 text-slate-400 text-sm">
+            <div>{T('noTexts', lang)}</div>
+            {textsAudit && (
+                <div className="text-[11px] text-slate-500 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+                    {lang === 'en'
+                        ? `Import check: ${textsAudit.keptRows}/${textsAudit.totalRows} valid rows`
+                        : `בדיקת ייבוא: ${textsAudit.keptRows}/${textsAudit.totalRows} שורות תקינות`}
+                </div>
+            )}
+        </div>
+    );
+
+    return (
+        <div className="flex h-full overflow-hidden">
+            <div className="w-72 border-l border-slate-200 bg-slate-50 flex flex-col shrink-0 overflow-hidden">
+                <div className="bg-slate-800 text-white text-xs font-semibold px-3 py-2.5 shrink-0">טקסטים והשוואות</div>
+                <div className="p-2 border-b border-slate-200 bg-white space-y-2 shrink-0">
+                    {textsAudit && (
+                        <div className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-[10px] text-slate-600 leading-relaxed">
+                            <div className="font-semibold text-slate-700">
+                                {lang === 'en' ? 'Import audit' : 'בקרת ייבוא'}
+                            </div>
+                            <div>
+                                {lang === 'en'
+                                    ? `${textsAudit.keptRows}/${textsAudit.totalRows} rows loaded`
+                                    : `${textsAudit.keptRows}/${textsAudit.totalRows} שורות נטענו`}
+                            </div>
+                            {auditReasonRows.length > 0 && (
+                                <div>
+                                    {auditReasonRows.map(r => `${r.label}: ${r.count}`).join(' | ')}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {textsInnerTab === 'stories' && (
+                        <>
+                            <div className="text-[10px] text-slate-500">{`\u05e1\u05d9\u05e0\u05d5\u05e4\u05e1\u05d9\u05e1 + \u05d1\u05d7\u05d9\u05e8\u05ea \u05e7\u05d8\u05e2`}</div>
+                            <select value={selectedStory ?? ''}
+                                onChange={e => setSelectedStory(Number(e.target.value))}
+                                className="w-full border border-slate-300 rounded px-2 py-1 text-xs bg-white">
+                                {storyNums.map(n => (
+                                    <option key={n} value={n}>{`\u05e1\u05d9\u05e4\u05d5\u05e8 ${n} \u2014 ${storyNames[n] || ''}`}</option>
+                                ))}
+                            </select>
+                            <select value={baseSynopsisKey}
+                                onChange={e => setBaseSynopsisKey(e.target.value)}
+                                className="w-full border border-slate-300 rounded px-2 py-1 text-xs bg-white">
+                                {synopsisRows.map(r => (
+                                    <option key={r.key} value={r.key}>{`${shortLib(r.library)} (${r.number})`}</option>
+                                ))}
+                            </select>
+                            <select value={selectedSegIdx == null ? '' : selectedSegIdx}
+                                onChange={e => setSelectedSegIdx(e.target.value === '' ? null : Number(e.target.value))}
+                                className="w-full border border-slate-300 rounded px-2 py-1 text-xs bg-white">
+                                <option value="">{lang === 'en' ? 'Jump to segment?' : '\u05e7\u05e4\u05d5\u05e5 \u05dc\u05e7\u05d8\u05e2\u2026'}</option>
+                                {synopsisTableRows.map(row => (
+                                    <option key={`seg-${row.segIdx}`} value={row.segIdx}>{`${lang === 'en' ? 'Segment' : '\u05e7\u05d8\u05e2'} ${row.segIdx + 1}`}</option>
+                                ))}
+                            </select>
+                        </>
+                    )}
+
+                    {textsInnerTab === 'map' && (
+                        <>
+                            <select value={selectedStory ?? ''}
+                                onChange={e => setSelectedStory(Number(e.target.value))}
+                                className="w-full border border-slate-300 rounded px-2 py-1 text-xs bg-white">
+                                {storyNums.map(n => (
+                                    <option key={n} value={n}>{`סיפור ${n} — ${storyNames[n] || ''}`}</option>
+                                ))}
+                            </select>
+                            <div className="text-[10px] text-slate-500 leading-relaxed">
+                                כולם מול כולם מופיע כאן, יחד עם עץ הקרבה הכללי.
+                            </div>
+                        </>
+                    )}
+                </div>
+
+                <div className="px-3 py-2 text-[11px] text-slate-500 border-b border-slate-200 shrink-0">
+                    בחר כתבי יד להצגה והשוואה ({selectedKeys.length})
+                </div>
+                <div className="overflow-y-auto flex-1 px-2 py-2 space-y-1">
+                    {msList.map(ms => {
+                        const checked = selectedKeys.includes(ms.key);
+                        return (
+                            <label key={ms.key} className={`flex items-start gap-2 rounded px-2 py-1.5 cursor-pointer ${checked ? 'bg-indigo-50' : 'hover:bg-white'}`}>
+                                <input type="checkbox" checked={checked} onChange={() => toggleMs(ms.key)} className="mt-0.5" />
+                                <span className="text-xs leading-snug">
+                                    <span className="block text-slate-700">{shortLib(ms.library)}</span>
+                                    <span className="block text-[10px] text-slate-400">{ms.number}</span>
+                                </span>
+                            </label>
+                        );
+                    })}
+                </div>
+            </div>
+
+            <div className="flex-1 overflow-auto p-4 bg-white space-y-4">
+                <div className="flex justify-center">
+                    <div className="inline-flex rounded-lg border border-slate-300 overflow-hidden bg-white text-xs">
+                        <button onClick={() => setTextsInnerTab('stories')}
+                            className={`px-3 py-1.5 ${textsInnerTab === 'stories' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+                            {lang === 'en' ? 'Stories' : '\u05e1\u05d9\u05e4\u05d5\u05e8\u05d9\u05dd'}
+                        </button>
+                        <button onClick={() => setTextsInnerTab('map')}
+                            className={`px-3 py-1.5 ${textsInnerTab === 'map' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+                            {lang === 'en' ? 'General Map' : '\u05de\u05e4\u05d4 \u05db\u05dc\u05dc\u05d9\u05ea'}
+                        </button>
+                    </div>
+                </div>
+
+                {textsInnerTab === 'stories' ? (
+                    
+                        <div>
+                            <div className="mb-4">
+                                <h2 className="text-lg font-bold text-slate-800 heb">
+                                    {selectedStory == null ? '' : (storyNames[selectedStory] || `סיפור ${selectedStory}`)}
+                                </h2>
+                                <p className="text-slate-400 text-sm">
+                                    סינופסיס מקבילי: כל שורה היא יחידת טקסט, כל עמודה כתב יד נבחר
+                                </p>
+                                <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-slate-600">
+                                    <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5">
+                                        <span className="inline-block w-2 h-2 rounded bg-rose-300" />
+                                        {lang === 'en' ? 'added in witness' : 'נוסף בעד הנוכחי'}
+                                    </span>
+                                    <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5">
+                                        <span className="line-through text-rose-700">abc</span>
+                                        {lang === 'en' ? 'missing from witness (exists in base)' : 'חסר בעד הנוכחי (קיים בבסיס)'}
+                                    </span>
+                                </div>
+                                <div className="mt-2 text-[11px] text-slate-500">{alignmentAlgoLabel}</div>
+                            </div>
+                            {synopsisRows.length === 0 ? (
+                                <div className="text-sm text-slate-400">אין טקסטים זמינים לסיפור שנבחר בכתבי היד המסומנים.</div>
+                            ) : (
+                                <div className="space-y-3">
+                                    <div className="rounded-xl border border-slate-200 overflow-auto max-h-[60vh]">
+                                        <table className="text-xs border-collapse min-w-[860px] w-full">
+                                            <thead className="sticky top-0 z-10 bg-slate-800 text-white">
+                                                <tr>
+                                                    <th className="px-2 py-2 text-center border-l border-slate-600 min-w-[42px]">#</th>
+                                                    {synopsisRows.map(r => {
+                                                        const profile = textDiffProfile(synopsisByKey[baseSynopsisKey] || '', synopsisByKey[r.key] || '');
+                                                        const summary = alignedSynopsisByKey[r.key]?._summary;
+                                                        return (
+                                                            <th key={r.key}
+                                                                onClick={() => setMsReadKey(r.key)}
+                                                                title={lang === 'en' ? 'Open manuscript reading' : 'פתח קריאה לפי כתב יד'}
+                                                                className={`px-2 py-2 text-right border-l border-slate-600 min-w-[230px] align-bottom cursor-pointer hover:bg-slate-700/40 ${msReadKey === r.key ? 'bg-slate-700/60' : ''}`}>
+                                                                <div className="text-[11px] leading-tight">{shortLib(r.library)}</div>
+                                                                <div className="text-[10px] text-slate-300 mt-0.5">{r.number}</div>
+                                                                <div className={`inline-block mt-1 text-[9px] rounded px-1.5 py-0.5 ${r.key === baseSynopsisKey ? 'bg-indigo-500 text-white' : profile.score > 0.82 ? 'bg-emerald-500 text-white' : profile.score > 0.62 ? 'bg-amber-500 text-white' : 'bg-rose-500 text-white'}`}>
+                                                                    {r.key === baseSynopsisKey ? 'בסיס' : `דמיון ${Math.round(profile.score * 100)}%`}
+                                                                </div>
+                                                                {summary && r.key !== baseSynopsisKey && (
+                                                                    <div className="text-[9px] text-slate-300 mt-0.5" dir="ltr">
+                                                                        gaps:{summary.gaps} | tail:{summary.tailGaps} | low:{summary.tailLow}
+                                                                    </div>
+                                                                )}
+                                                            </th>
+                                                        );
+                                                    })}
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {synopsisTableRows.map(row => {
+                                                    const baseCell = row.cells.find(c => c.key === baseSynopsisKey)?.text || '';
+                                                    return (
+                                                        <tr
+                                                            key={row.segIdx}
+                                                            data-seg-idx={row.segIdx}
+                                                            className={`border-b border-slate-100 align-top hover:bg-slate-50 ${row.segIdx === selectedSegIdx ? 'bg-indigo-50/60' : ''}`}>
+                                                            <td className="px-2 py-2 text-center text-slate-400 font-mono border-l border-slate-100">{row.segIdx + 1}</td>
+                                                            {row.cells.map(cell => {
+                                                                const profile = cell.key === baseSynopsisKey
+                                                                    ? { score: 1, added: 0, removed: 0 }
+                                                                    : textDiffProfile(baseCell, cell.text);
+                                                                const wordDiff = cell.key === baseSynopsisKey
+                                                                    ? null
+                                                                    : wordLevelWitnessDiff(baseCell, cell.text);
+                                                                const cls = profile.score > 0.9
+                                                                    ? 'bg-white text-slate-700'
+                                                                    : profile.score > 0.7
+                                                                        ? 'bg-amber-50 text-amber-900'
+                                                                        : 'bg-rose-50 text-rose-900';
+                                                                return (
+                                                                    <td key={cell.key}
+                                                                        className={`px-2 py-2 border-l border-slate-100 leading-relaxed heb text-justify ${cls}`}>
+                                                                        {cell.key === baseSynopsisKey ? (
+                                                                            cell.text || <span className="text-slate-300">·</span>
+                                                                        ) : cell.text ? (
+                                                                            <span>
+                                                                                {wordDiff.tokens.map((tok, idx) => (
+                                                                                    <span
+                                                                                        key={`${cell.key}-${row.segIdx}-${idx}`}
+                                                                                        className={tok.kind === 'added' ? 'bg-rose-200 text-rose-900 rounded px-0.5' : ''}>
+                                                                                        {tok.raw}{idx < wordDiff.tokens.length - 1 ? ' ' : ''}
+                                                                                    </span>
+                                                                                ))}
+                                                                            </span>
+                                                                        ) : (
+                                                                            <span className="text-slate-300">·</span>
+                                                                        )}
+                                                                        {cell.key !== baseSynopsisKey && cell.text && (
+                                                                            <div className="mt-1 text-[9px] text-slate-500 not-italic" dir="ltr">
+                                                                                seg +{profile.added} -{profile.removed} · words +{wordDiff.addedCount} -{wordDiff.removedCount}
+                                                                            </div>
+                                                                        )}
+                                                                        {cell.key !== baseSynopsisKey && wordDiff && wordDiff.removedWords.length > 0 && (
+                                                                            <div className="mt-1 text-[9px] text-slate-500 leading-snug not-italic" dir="ltr">
+                                                                                base-only:{' '}
+                                                                                {wordDiff.removedWords.slice(0, 8).map((w, idx) => (
+                                                                                    <span key={`${cell.key}-${row.segIdx}-rm-${idx}`} className="line-through text-rose-700 mr-1">{w}</span>
+                                                                                ))}
+                                                                                {wordDiff.removedWords.length > 8 ? ' ...' : ''}
+                                                                            </div>
+                                                                        )}
+                                                                    </td>
+                                                                );
+                                                            })}
+                                                        </tr>
+                                                    );
+                                                })}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                    {msReadRow && (
+                                        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                                            <div className="flex items-center justify-between gap-2 mb-2">
+                                                <div>
+                                                    <div className="text-sm font-semibold text-slate-700">
+                                                        {lang === 'en' ? 'Manuscript reading' : '\u05e7\u05e8\u05d9\u05d0\u05d4 \u05dc\u05e4\u05d9 \u05db\u05ea\u05d1 \u05d9\u05d3'}
+                                                    </div>
+                                                    <div className="text-[11px] text-slate-500">
+                                                        {shortLib(msReadRow.library)} | {msReadRow.number}
+                                                    </div>
+                                                </div>
+                                                <button
+                                                    onClick={() => setMsReadKey('')}
+                                                    className="text-[11px] text-slate-500 hover:text-slate-700">
+                                                    {lang === 'en' ? 'Close' : '\u05e1\u05d2\u05d5\u05e8'}
+                                                </button>
+                                            </div>
+                                            <div className="rounded-lg border border-slate-200 bg-white max-h-[380px] overflow-y-auto">
+                                                {msReadRow.seq.map(row => (
+                                                    <div key={`msread-${msReadRow.key}-${row.num}`}
+                                                        className={`p-3 border-b border-slate-100 last:border-b-0 ${row.num === selectedStory ? 'bg-indigo-50/60' : ''}`}>
+                                                        <div className="text-[11px] text-indigo-600 font-semibold mb-1">
+                                                            {lang === 'en' ? `Story ${row.num}` : `\u05e1\u05d9\u05e4\u05d5\u05e8 ${row.num}`} {storyNames[row.num] ? `\u2014 ${storyNames[row.num]}` : ''}
+                                                        </div>
+                                                        <p className="text-sm leading-relaxed text-slate-800 heb text-justify">{row.text}</p>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                                        <div className="flex items-center justify-between gap-2 mb-2">
+                                            <div className="text-sm font-semibold text-slate-700">
+                                                {lang === 'en' ? 'Story manuscript tree' : '\u05e2\u05e5 \u05db\u05ea\u05d1\u05d9 \u05d9\u05d3 \u05dc\u05e1\u05d9\u05e4\u05d5\u05e8'}
+                                            </div>
+                                            <div className="flex items-center gap-2 text-xs">
+                                                <label className="text-[11px] text-slate-500">{lang === 'en' ? 'Zoom' : '\u05d6\u05d5\u05dd'}</label>
+                                                <input
+                                                    type="range"
+                                                    min="0.7"
+                                                    max="1.8"
+                                                    step="0.1"
+                                                    value={treeZoom}
+                                                    onChange={e => setTreeZoom(Number(e.target.value))}
+                                                />
+                                            </div>
+                                        </div>
+                                        {selectedMs.length < 2 ? (
+                                            <div className="text-xs text-slate-400">
+                                                {lang === 'en'
+                                                    ? 'Select at least two manuscripts to show a tree.'
+                                                    : '\u05d1\u05d7\u05e8 \u05dc\u05e4\u05d7\u05d5\u05ea \u05e9\u05e0\u05d9 \u05db\u05ea\u05d1\u05d9 \u05d9\u05d3 \u05db\u05d3\u05d9 \u05dc\u05d4\u05e6\u05d9\u05d2 \u05e2\u05e5.'}
+                                            </div>
+                                        ) : !dendrogram ? (
+                                            <div className="text-xs text-slate-400">
+                                                {lang === 'en'
+                                                    ? 'Tree could not be computed for current selection.'
+                                                    : '\u05dc\u05d0 \u05e0\u05d9\u05ea\u05df \u05dc\u05d7\u05e9\u05d1 \u05e2\u05e5 \u05e2\u05d1\u05d5\u05e8 \u05d4\u05d1\u05d7\u05d9\u05e8\u05d4 \u05d4\u05e0\u05d5\u05db\u05d7\u05d9\u05ea.'}
+                                            </div>
+                                        ) : (
+                                            <div className="bg-white rounded-lg border border-slate-200 p-3 overflow-auto">
+                                                <svg
+                                                    viewBox={`0 0 ${dendrogram.width} ${dendrogram.height}`}
+                                                    width="100%"
+                                                    height={Math.min(520, dendrogram.height)}
+                                                    className="min-w-[760px]"
+                                                    style={{ transform: `scale(${treeZoom})`, transformOrigin: 'top center' }}>
+                                                    {dendrogram.ticks.map((t, i) => (
+                                                        <g key={`tick-s-${i}`}>
+                                                            <line x1={26} y1={t.y} x2={dendrogram.width - 26} y2={t.y} stroke="#e2e8f0" strokeWidth="1" />
+                                                            <text x={28} y={t.y - 3} fontSize="9" fill="#94a3b8">d={t.h.toFixed(2)}</text>
+                                                        </g>
+                                                    ))}
+                                                    {dendrogram.segments.map((s, i) => (
+                                                        <line key={`br-s-${i}`} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke={s.col} strokeWidth={s.w} strokeLinecap="round" opacity="0.9" />
+                                                    ))}
+                                                    {dendrogram.nodes.map((n, i) => (
+                                                        <g key={`nd-s-${i}`}>
+                                                            <circle cx={n.x} cy={n.y} r="3.1" fill={n.col} stroke="#0f172a" strokeWidth="0.5" />
+                                                            <rect x={n.x - 13} y={n.y - 14} width="26" height="10" rx="3" fill="white" opacity="0.94" />
+                                                            <text x={n.x - 11} y={n.y - 6} fontSize="8.5" fill="#64748b">{n.h.toFixed(2)}</text>
+                                                        </g>
+                                                    ))}
+                                                    {dendrogram.labels.map((lb, i) => (
+                                                        <line key={`st-s-${i}`} x1={lb.x} y1={dendrogram.yLeaf} x2={lb.x} y2={lb.y - 4} stroke="#cbd5e1" strokeWidth="1" />
+                                                    ))}
+                                                    {dendrogram.labels.map((lb, i) => (
+                                                        <g key={`lb-s-${i}`}>
+                                                            <rect x={lb.x - 72} y={lb.y} width="144" height="34" rx="6" fill="#f8fafc" stroke="#e2e8f0" />
+                                                            <text x={lb.x} y={lb.y + 12} fontSize="10" fill="#0f172a" textAnchor="middle">{lb.l1}</text>
+                                                            {lb.l2 && <text x={lb.x} y={lb.y + 24} fontSize="9" fill="#64748b" textAnchor="middle">{lb.l2}</text>}
+                                                        </g>
+                                                    ))}
+                                                </svg>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {baseFullDiff.length > 0 && (
+
+                                        <div className="rounded-xl border border-slate-200 bg-slate-50 p-2.5">
+                                            <div className="text-[11px] text-slate-600 mb-2">
+                                                {lang === 'en' ? 'Whole-story word-level diff (base vs each witness)' : 'דיפרנציאל מילים לכל הסיפור (בסיס מול כל עד)'}
+                                            </div>
+                                            <div className="flex gap-2 flex-nowrap overflow-x-auto pb-1">
+                                                {baseFullDiff.map(r => (
+                                                    <div key={`base-${r.key}`} className="rounded-lg border border-slate-200 bg-white px-2.5 py-2 min-w-[250px] shrink-0">
+                                                        <div className="flex items-center justify-between gap-2">
+                                                            <div>
+                                                                <div className="text-[11px] text-slate-700">{shortLib(r.library)}</div>
+                                                                <div className="text-[10px] text-slate-400">{r.number}</div>
+                                                            </div>
+                                                            <span className={`text-[10px] rounded px-1.5 py-0.5 ${r.score > 0.82 ? 'bg-emerald-100 text-emerald-700' : r.score > 0.62 ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>
+                                                                {Math.round(r.score * 100)}%
+                                                            </span>
+                                                        </div>
+                                                        <div className="text-[10px] text-slate-500 mt-1" dir="ltr">
+                                                            words +{r.addedCount} -{r.removedCount} · seg +{r.added} -{r.removed}
+                                                        </div>
+                                                        {r.removedWords.length > 0 && (
+                                                            <div className="mt-1 text-[10px] text-slate-500" dir="ltr">
+                                                                base-only:{' '}
+                                                                {r.removedWords.slice(0, 10).map((w, idx) => (
+                                                                    <span key={`${r.key}-rm-${idx}`} className="line-through text-rose-700 mr-1">{w}</span>
+                                                                ))}
+                                                                {r.removedWords.length > 10 ? ' ...' : ''}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                ) : (
+                    <div className="space-y-3">
+                        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                                <div>
+                                    <div className="text-sm font-semibold text-slate-700">מפה כללית בין כתבי יד</div>
+                                    <div className="text-[11px] text-slate-500">כולם מול כולם + עץ קרבה היררכי</div>
+                                </div>
+                                <div className="flex gap-1 text-xs items-center flex-wrap">
+                                    <label className="text-[11px] text-slate-500 px-1">??????</label>
+                                    <input
+                                        type="range"
+                                        min="0.7"
+                                        max="1.8"
+                                        step="0.1"
+                                        value={treeZoom}
+                                        onChange={e => setTreeZoom(Number(e.target.value))}
+                                    />
+                                </div>
+                            </div>
+
+                            {selectedMs.length < 2 ? (
+                                <div className="text-xs text-slate-400">בחר לפחות שני כתבי יד כדי להציג מפת דמיון.</div>
+                            ) : (
+                                <div className="rounded-xl border border-slate-200 overflow-auto bg-white">
+                                    <table className="text-xs border-collapse min-w-[760px] w-full">
+                                        <thead className="sticky top-0 z-10 bg-slate-800 text-white">
+                                            <tr>
+                                                <th className="px-2 py-2 border-l border-slate-600 min-w-[150px]">כתב יד</th>
+                                                {selectedMs.map(r => (
+                                                    <th key={`mh-${r.key}`} className="px-2 py-2 text-right border-l border-slate-600 min-w-[120px]">
+                                                        <div className="text-[10px] leading-tight">{shortLib(r.library)}</div>
+                                                        <div className="text-[9px] text-slate-300">{r.number}</div>
+                                                    </th>
+                                                ))}
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {selectedMs.map((rowMs, i) => (
+                                                <tr key={`mr-${rowMs.key}`} className="border-b border-slate-100">
+                                                    <td className="px-2 py-2 text-right bg-slate-50 border-l border-slate-100">
+                                                        <div className="text-[10px] leading-tight text-slate-700">{shortLib(rowMs.library)}</div>
+                                                        <div className="text-[9px] text-slate-400">{rowMs.number}</div>
+                                                    </td>
+                                                    {selectedMs.map((colMs, j) => {
+                                                        const p = mapPairwise[i][j];
+                                                        const tone = p.similarity > 0.82
+                                                            ? 'bg-emerald-50 text-emerald-800'
+                                                            : p.similarity > 0.62
+                                                                ? 'bg-amber-50 text-amber-800'
+                                                                : 'bg-rose-50 text-rose-800';
+                                                        return (
+                                                            <td key={`mc-${rowMs.key}-${colMs.key}`} className={`px-2 py-2 border-l border-slate-100 ${tone}`}>
+                                                                <div className="font-semibold">{Math.round(p.similarity * 100)}%</div>
+                                                                <div className="text-[9px] opacity-80">d={p.distance.toFixed(2)}</div>
+                                                            </td>
+                                                        );
+                                                    })}
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                            <div className="text-sm font-semibold text-slate-700 mb-2">עץ שינויים בין כתבי יד</div>
+                            {selectedMs.length < 2 ? (
+                                <div className="text-xs text-slate-400">בחר לפחות שני כתבי יד כדי לחשב עץ.</div>
+                            ) : !dendrogram ? (
+                                <div className="text-xs text-slate-400">לא ניתן לחשב עץ עבור הבחירה הנוכחית.</div>
+                            ) : (
+                                <div className="bg-white rounded-lg border border-slate-200 p-3 overflow-auto">
+                                    <svg
+                                        viewBox={`0 0 ${dendrogram.width} ${dendrogram.height}`}
+                                        width="100%"
+                                        height={Math.min(560, dendrogram.height)}
+                                        className="min-w-[760px]"
+                                        style={{ transform: `scale(${treeZoom})`, transformOrigin: 'top center' }}>
+                                        {dendrogram.ticks.map((t, i) => (
+                                            <g key={`tick-${i}`}>
+                                                <line x1={26} y1={t.y} x2={dendrogram.width - 26} y2={t.y} stroke="#e2e8f0" strokeWidth="1" />
+                                                <text x={28} y={t.y - 3} fontSize="9" fill="#94a3b8">d={t.h.toFixed(2)}</text>
+                                            </g>
+                                        ))}
+                                        {dendrogram.segments.map((s, i) => (
+                                            <line key={`br-${i}`} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke={s.col} strokeWidth={s.w} strokeLinecap="round" opacity="0.9" />
+                                        ))}
+                                        {dendrogram.nodes.map((n, i) => (
+                                            <g key={`nd-${i}`}>
+                                                <circle cx={n.x} cy={n.y} r="3.1" fill={n.col} stroke="#0f172a" strokeWidth="0.5" />
+                                                <rect x={n.x - 13} y={n.y - 14} width="26" height="10" rx="3" fill="white" opacity="0.94" />
+                                                <text x={n.x - 11} y={n.y - 6} fontSize="8.5" fill="#64748b">{n.h.toFixed(2)}</text>
+                                            </g>
+                                        ))}
+                                        {dendrogram.labels.map((lb, i) => (
+                                            <line key={`st-${i}`} x1={lb.x} y1={dendrogram.yLeaf} x2={lb.x} y2={lb.y - 4} stroke="#cbd5e1" strokeWidth="1" />
+                                        ))}
+                                        {dendrogram.labels.map((lb, i) => (
+                                            <g key={`lb-${i}`}>
+                                                <rect x={lb.x - 72} y={lb.y} width="144" height="34" rx="6" fill="#f8fafc" stroke="#e2e8f0" />
+                                                <text x={lb.x} y={lb.y + 12} fontSize="10" fill="#0f172a" textAnchor="middle">{lb.l1}</text>
+                                                {lb.l2 && <text x={lb.x} y={lb.y + 24} fontSize="9" fill="#64748b" textAnchor="middle">{lb.l2}</text>}
+                                            </g>
+                                        ))}
+                                    </svg>
+                                    <div className="text-[10px] text-slate-500 mt-2 leading-relaxed">
+                                        {lang === 'en'
+                                            ? 'Method: agglomerative average-linkage (UPGMA). Distance is 1 - Jaccard of tokens. Each step merges the closest pair of clusters using average pair distance. Higher branches represent larger textual distance.'
+                                            : 'שיטה: אשכול היררכי מסוג average-linkage (UPGMA). המרחק הוא 1 פחות Jaccard של אוצר המילים. בכל צעד ממזגים את שני האשכולות הקרובים ביותר לפי ממוצע המרחקים ביניהם. ענפים גבוהים יותר מציינים מרחק טקסטואלי גדול יותר.'}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ROOT APP
+═══════════════════════════════════════════════════════════ */
+const App = () => {
+    const [lang,      setLang    ] = useState('he');
+    const [tab,       setTab     ] = useState('inventory');
+    const [view,      setView    ] = useState('table');   // 'table' | 'map'
+    const [textsJumpStory, setTextsJumpStory] = useState(null);
+    const [loading,   setLoading ] = useState(true);
+    const [reloadSeq, setReloadSeq] = useState(0);
+    const [lastLoadedAt, setLastLoadedAt] = useState(null);
+    const [errors,    setErrors  ] = useState([]);
+    const [mssData,   setMssData ] = useState([]);
+    const [workNames, setWorkNames] = useState([]);
+    const [metaFields, setMetaFields] = useState([]);
+    const [orderData, setOrderData] = useState([]);
+    const [textsData, setTextsData] = useState([]);
+    const [textsAudit, setTextsAudit] = useState(null);
+    const storiesWithFullText = useMemo(() => {
+        const s = new Set();
+        textsData.forEach(t => {
+            if (t.storyNum == null) return;
+            if (!String(t.text || '').trim()) return;
+            s.add(Number(t.storyNum));
+        });
+        return [...s];
+    }, [textsData]);
+
+    const requestLiveReload = () => {
+        setReloadSeq(x => x + 1);
+    };
+
+    useEffect(() => {
+        const enc = s => encodeURIComponent(s);
+        const cacheTag = `reload_${reloadSeq}_${Date.now()}`;
+        setLoading(true);
+        setErrors([]);
+
+        Promise.allSettled([
+            fetchGviz(MSS_ID,    'sheet=mss', cacheTag + '_mss'),                       // [0] MSS inventory (mss tab)
+            fetchGviz(IGERET_ID, 'gid=0', cacheTag + '_order'),                        // [1] story order
+            fetchGviz(IGERET_ID, 'sheet=' + enc('טקסט סיפורים'), cacheTag + '_texts'), // [2] story texts
+        ]).then(results => {
+            const [r0, r1, r2] = results;
+            const errs = [];
+
+            if (r0.status === 'fulfilled') {
+                const { mssData: md, workNames: wn, metaFields: mf } = parseMss(r0.value);
+                setMssData(md);
+                setWorkNames(wn);
+                setMetaFields(mf || []);
+            } else {
+                errs.push(`מצאי כ״י: ${r0.reason?.message || 'שגיאה'}`);
+            }
+
+            if (r1.status === 'fulfilled') {
+                setOrderData(parseIgeret1(r1.value));
+            } else {
+                errs.push(`סדר סיפורים: ${r1.reason?.message || 'שגיאה'}`);
+            }
+
+            if (r2.status === 'fulfilled') {
+                const parsedTexts = parseIgeret2(r2.value);
+                setTextsData(parsedTexts.rows || []);
+                setTextsAudit(parsedTexts.audit || null);
+            } else {
+                setTextsAudit(null);
+                errs.push(`טקסטים: ${r2.reason?.message || 'שגיאה'}`);
+            }
+
+            setErrors(errs);
+            setLastLoadedAt(new Date());
+            setLoading(false);
+        });
+    }, [reloadSeq]);
+
+    /* Loading screen */
+    if (loading) return (
+        <div className="h-screen flex flex-col items-center justify-center gap-5 bg-slate-50">
+            <div className="spin-ring" />
+            <div className="text-center">
+                <p className="text-slate-600 font-medium text-sm">{T('loadingTitle', lang)}</p>
+                <p className="text-slate-400 text-xs mt-1">{T('loadingSub', lang)}</p>
+            </div>
+        </div>
+    );
+
+    /* Derived stats */
+    const uniqueIgeretMs = new Set(orderData.map(r => msKey(r.library, r.number))).size;
+    const uniqueStories  = new Set(textsData.map(t => t.storyNum).filter(Boolean)).size;
+
+    const TABS = [
+        { id: 'inventory', label: T('tabInventory', lang), desc: `${mssData.length} ${T('mssLabel', lang)}` },
+        { id: 'order',     label: T('tabOrder',     lang), desc: `${uniqueIgeretMs} ${T('mssLabel', lang)}` },
+        { id: 'texts',     label: T('tabTexts',     lang), desc: `${uniqueStories}` },
+    ];
+
+    return (
+        <div className="flex flex-col h-screen overflow-hidden bg-slate-100" dir={lang === 'en' ? 'ltr' : 'rtl'}>
+
+            {/* ── HEADER ── */}
+            <header className="bg-slate-900 text-white px-4 py-3 flex items-center justify-between gap-3 flex-wrap shrink-0 shadow-md z-40">
+                <div>
+                    <h1 className="text-[15px] font-bold leading-tight">{T('appTitle', lang)}</h1>
+                    <p className="text-[11px] text-slate-400 mt-0.5">{T('appSub', lang)}</p>
+                </div>
+                <nav className="flex gap-1 bg-slate-800 p-1 rounded-xl">
+                    {TABS.map(t => (
+                        <button key={t.id} onClick={() => setTab(t.id)}
+                            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors flex flex-col items-center gap-0
+                                ${tab === t.id
+                                    ? 'bg-indigo-600 text-white shadow-sm'
+                                    : 'text-slate-300 hover:text-white hover:bg-slate-700'}`}>
+                            <span>{t.label}</span>
+                            <span className={`text-[9px] ${tab === t.id ? 'text-indigo-200' : 'text-slate-500'}`}>
+                                {t.desc}
+                            </span>
+                        </button>
+                    ))}
+                </nav>
+                <button
+                    onClick={() => setLang(l => l === 'he' ? 'en' : 'he')}
+                    className="text-xs bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-1.5 rounded-lg transition-colors border border-slate-600 shrink-0">
+                    {T('langBtn', lang)}
+                </button>
+                <button
+                    onClick={() => requestLiveReload()}
+                    className="text-xs bg-emerald-700 hover:bg-emerald-600 text-emerald-50 px-3 py-1.5 rounded-lg transition-colors border border-emerald-600 shrink-0">
+                    {lang === 'en' ? 'Reload Data' : 'רענון נתונים'}
+                </button>
+            </header>
+
+            <div className="bg-slate-50 border-b border-slate-200 px-4 py-1.5 text-[11px] text-slate-500 shrink-0">
+                {lang === 'en' ? 'Last live load:' : 'טעינה חיה אחרונה:'} {lastLoadedAt ? lastLoadedAt.toLocaleTimeString() : '—'}
+            </div>
+
+            {/* ── ERROR BANNER ── */}
+            {errors.length > 0 && (
+                <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-sm text-amber-800 flex gap-2 items-start shrink-0">
+                    <span className="shrink-0">⚠</span>
+                    <div>
+                        <span className="font-semibold">{T('errTitle', lang)} </span>
+                        {errors.join(' | ')}
+                        <div className="text-xs text-amber-600 mt-0.5">
+                            {T('errHint', lang)}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ── MAIN ── */}
+            <main className="flex-1 overflow-hidden p-3" style={{ minHeight: 0 }}>
+                <div className="h-full bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
+
+                    {/* ── INVENTORY TAB ── */}
+                    {tab === 'inventory' && (
+                        <>
+                            <div className="border-b border-slate-200 px-3 py-2 bg-slate-50 flex items-center gap-2 shrink-0">
+                                <button onClick={() => setView('table')}
+                                    className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors
+                                        ${view === 'table'
+                                            ? 'bg-indigo-600 text-white shadow-sm'
+                                            : 'border border-slate-300 bg-white text-slate-600 hover:bg-slate-50'}`}>
+                                    {T('viewTable', lang)}
+                                </button>
+                                <button onClick={() => setView('map')}
+                                    className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors
+                                        ${view === 'map'
+                                            ? 'bg-indigo-600 text-white shadow-sm'
+                                            : 'border border-slate-300 bg-white text-slate-600 hover:bg-slate-50'}`}>
+                                    {T('viewMap', lang)}
+                                </button>
+                            </div>
+                            <div className="flex-1 overflow-hidden">
+                                {view === 'table'
+                                    ? <InventoryTable mssData={mssData} workNames={workNames} metaFields={metaFields} lang={lang} />
+                                    : <ProximityMap   mssData={mssData} workNames={workNames} orderData={orderData} lang={lang} />
+                                }
+                            </div>
+                        </>
+                    )}
+
+                    {/* ── STORY ORDER TAB ── */}
+                    {tab === 'order' && (
+                        <StoryOrderTab
+                            orderData={orderData}
+                            lang={lang}
+                            storiesWithFullText={storiesWithFullText}
+                            onOpenTextStory={(storyNum) => {
+                                setTextsJumpStory(storyNum);
+                                setTab('texts');
+                            }}
+                        />
+                    )}
+
+                    {/* ── TEXTS TAB ── */}
+                    {tab === 'texts' && (
+                        <TextsTab textsData={textsData} textsAudit={textsAudit} orderData={orderData} lang={lang} jumpStory={textsJumpStory} />
+                    )}
+
+                </div>
+            </main>
+
+            {/* ── FOOTER ── */}
+            <footer className="bg-white border-t border-slate-200 py-1.5 text-center text-[10px] text-slate-400 shrink-0">
+                {T('footer', lang)}
+            </footer>
+        </div>
+    );
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
