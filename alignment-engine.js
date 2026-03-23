@@ -1,6 +1,12 @@
 (function () {
   'use strict';
 
+  var IGNORE_PUNCT_RE = /['"`\u2018\u2019\u201C\u201D\u05F3\u05F4]/g;
+  var IGNORE_PUNCT_TEST_RE = /['"`\u2018\u2019\u201C\u201D\u05F3\u05F4]/;
+  function isIgnoredToken(raw, norm) {
+    return norm === '\u05db\u05d5' && IGNORE_PUNCT_TEST_RE.test(String(raw || ''));
+  }
+
   function normalizeToken(t) {
     return String(t || '')
       .toLowerCase()
@@ -16,6 +22,7 @@
       .replace(/[ף]/g, 'פ')
       .replace(/[ץ]/g, 'צ')
       .replace(/[׳״]/g, '')
+      .replace(/['"`\u2018\u2019\u201C\u201D\u05f3\u05f4]/g, '')
       .replace(/["'.,;:!?()\[\]{}<>\-_\/\\|]+/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
@@ -24,8 +31,13 @@
   function tokenizeText(txt) {
     return String(txt || '')
       .split(/\s+/)
-      .map(normalizeToken)
-      .filter(Boolean);
+      .filter(Boolean)
+      .map(function (raw) {
+        var norm = normalizeToken(raw);
+        return { raw: raw, norm: norm };
+      })
+      .filter(function (t) { return t.norm && !isIgnoredToken(t.raw, t.norm); })
+      .map(function (t) { return t.norm; });
   }
 
   function textJaccard(a, b) {

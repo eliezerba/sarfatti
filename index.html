@@ -105,6 +105,16 @@ const cellNum = (row, idx) => {
     return isNaN(n) ? null : n;
 };
 
+const IGNORE_PUNCT_RE = /['"`\u2018\u2019\u201C\u201D\u05F3\u05F4]/g;
+const IGNORE_PUNCT_TEST_RE = /['"`\u2018\u2019\u201C\u201D\u05F3\u05F4]/;
+const stripIgnoredPunct = s => String(s || '').replace(IGNORE_PUNCT_RE, '');
+const isIgnoredToken = (raw, norm) => norm === '\u05db\u05d5' && IGNORE_PUNCT_TEST_RE.test(String(raw || ''));
+const isMinorPunctDiff = (a, b) => {
+    const sa = stripIgnoredPunct(a);
+    const sb = stripIgnoredPunct(b);
+    return sa && sb && sa === sb && String(a || '') !== String(b || '');
+};
+
 const msKey  = (lib, num) => `${lib}::${num}`;
 const shortLib = lib => {
     // "Amsterdam, Ets Haim Library" → "Ets Haim Library"
@@ -537,7 +547,8 @@ function normalizeToken(t) {
         .replace(/[ף]/g, 'פ')
         .replace(/[ץ]/g, 'צ')
         .replace(/[׳״]/g, '')
-        .replace(/["'.,;:!?()[\]{}<>\-_/\\|]+/g, '')
+        .replace(/['"`\u2018\u2019\u201C\u201D\u05f3\u05f4]/g, '')
+        .replace(/["'`\u2018\u2019\u201C\u201D\u05f3\u05f4.,;:!?()[\]{}<>\-_/\\|]+/g, '')
         .trim();
 }
 
@@ -547,8 +558,13 @@ function tokenizeText(txt) {
     }
     return String(txt || '')
         .split(/\s+/)
-        .map(normalizeToken)
-        .filter(Boolean);
+        .filter(Boolean)
+        .map(raw => {
+            const norm = normalizeToken(raw);
+            return { raw, norm };
+        })
+        .filter(t => t.norm && !isIgnoredToken(t.raw, t.norm))
+        .map(t => t.norm);
 }
 
 function textJaccard(a, b) {
@@ -592,16 +608,20 @@ function textDiffProfile(baseText, witnessText) {
 }
 
 function wordLevelWitnessDiff(baseText, witnessText) {
-    const baseSeq = String(baseText || '')
+    const splitTokens = txt => String(txt || '')
         .split(/\s+/)
         .filter(Boolean)
-        .map(raw => ({ raw, norm: normalizeToken(raw) }))
+        .map(raw => {
+            const norm = normalizeToken(raw);
+            const ignorable = !!(norm && isIgnoredToken(raw, norm));
+            return { raw, norm, ignorable };
+        })
         .filter(t => t.norm);
-    const witnessSeq = String(witnessText || '')
-        .split(/\s+/)
-        .filter(Boolean)
-        .map(raw => ({ raw, norm: normalizeToken(raw) }))
-        .filter(t => t.norm);
+
+    const baseTokens = splitTokens(baseText);
+    const witnessTokens = splitTokens(witnessText);
+    const baseSeq = baseTokens.filter(t => !t.ignorable);
+    const witnessSeq = witnessTokens.filter(t => !t.ignorable);
 
     const n = baseSeq.length;
     const m = witnessSeq.length;
@@ -617,13 +637,14 @@ function wordLevelWitnessDiff(baseText, witnessText) {
         }
     }
 
-    const tokens = [];
+    const coreOutByIdx = Array(m);
     const removedWords = [];
     let i = 0;
     let j = 0;
     while (i < n && j < m) {
         if (baseSeq[i].norm === witnessSeq[j].norm) {
-            tokens.push({ raw: witnessSeq[j].raw, kind: 'shared' });
+            const kind = isMinorPunctDiff(baseSeq[i].raw, witnessSeq[j].raw) ? 'minor' : 'shared';
+            coreOutByIdx[j] = { raw: witnessSeq[j].raw, kind };
             i++;
             j++;
             continue;
@@ -632,7 +653,7 @@ function wordLevelWitnessDiff(baseText, witnessText) {
             removedWords.push(baseSeq[i].raw);
             i++;
         } else {
-            tokens.push({ raw: witnessSeq[j].raw, kind: 'added' });
+            coreOutByIdx[j] = { raw: witnessSeq[j].raw, kind: 'added' };
             j++;
         }
     }
@@ -641,12 +662,25 @@ function wordLevelWitnessDiff(baseText, witnessText) {
         i++;
     }
     while (j < m) {
-        tokens.push({ raw: witnessSeq[j].raw, kind: 'added' });
+        coreOutByIdx[j] = { raw: witnessSeq[j].raw, kind: 'added' };
         j++;
     }
 
+    const tokens = [];
+    let coreIdx = 0;
+    witnessTokens.forEach(t => {
+        if (t.ignorable) {
+            tokens.push({ raw: t.raw, kind: 'minor' });
+            return;
+        }
+        const outTok = coreOutByIdx[coreIdx] || { raw: t.raw, kind: 'added' };
+        tokens.push(outTok);
+        coreIdx++;
+    });
+
     const addedCount = tokens.reduce((s, t) => s + (t.kind === 'added' ? 1 : 0), 0);
-    return { tokens, removedWords, removedCount: removedWords.length, addedCount };
+    const minorCount = tokens.reduce((s, t) => s + (t.kind === 'minor' ? 1 : 0), 0);
+    return { tokens, removedWords, removedCount: removedWords.length, addedCount, minorCount };
 }
 
 function splitSynopsisText(txt) {
@@ -2911,6 +2945,12 @@ function TextsTab({ textsData, textsAudit, orderData, lang, jumpStory }) {
                                         <span className="line-through text-rose-700">abc</span>
                                         {lang === 'en' ? 'missing from witness (exists in base)' : 'חסר בעד הנוכחי (קיים בבסיס)'}
                                     </span>
+                                    <span class="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5">
+                                        <span class="inline-block w-2 h-2 rounded bg-amber-300" />
+                                        {lang === 'en'
+                                            ? 'ignored punctuation/abbrev (not counted)'
+                                            : 'גרש/גרשיים/כו״ מוצג אך לא נספר'}
+                                    </span>
                                 </div>
                                 <div className="mt-2 text-[11px] text-slate-500">{alignmentAlgoLabel}</div>
                             </div>
@@ -2977,7 +3017,11 @@ function TextsTab({ textsData, textsAudit, orderData, lang, jumpStory }) {
                                                                                 {wordDiff.tokens.map((tok, idx) => (
                                                                                     <span
                                                                                         key={`${cell.key}-${row.segIdx}-${idx}`}
-                                                                                        className={tok.kind === 'added' ? 'bg-rose-200 text-rose-900 rounded px-0.5' : ''}>
+                                                                                        className={tok.kind === 'added'
+                                                                                            ? 'bg-rose-200 text-rose-900 rounded px-0.5'
+                                                                                            : tok.kind === 'minor'
+                                                                                                ? 'bg-amber-200 text-amber-900 rounded px-0.5'
+                                                                                                : ''}>
                                                                                         {tok.raw}{idx < wordDiff.tokens.length - 1 ? ' ' : ''}
                                                                                     </span>
                                                                                 ))}
