@@ -3,12 +3,36 @@
 
   var IGNORE_PUNCT_RE = /['"`\u2018\u2019\u201C\u201D\u05F3\u05F4]/g;
   var IGNORE_PUNCT_TEST_RE = /['"`\u2018\u2019\u201C\u201D\u05F3\u05F4]/;
+  function stripFootnoteRefs(s) {
+    return String(s || '').replace(/\[\d+\]/g, '');
+  }
   function isIgnoredToken(raw, norm) {
     return norm === '\u05db\u05d5' && IGNORE_PUNCT_TEST_RE.test(String(raw || ''));
   }
+  function normalizeDivineRaw(s) {
+    return stripFootnoteRefs(String(s || ''))
+      .toLowerCase()
+      .replace(/[\u0591-\u05c7]/g, '')
+      .replace(/[ך]/g, 'כ')
+      .replace(/[ם]/g, 'מ')
+      .replace(/[ן]/g, 'נ')
+      .replace(/[ף]/g, 'פ')
+      .replace(/[ץ]/g, 'צ')
+      .replace(/['"`\u2018\u2019\u201C\u201D\u05F3\u05F4.,;:!?()\[\]{}<>\-_\/\\|]/g, '')
+      .trim();
+  }
+  function isDivineNameToken(raw, normHint) {
+    var rawCompact = stripFootnoteRefs(String(raw || '')).replace(/[\u0591-\u05c7\s]/g, '');
+    var normalized = normalizeDivineRaw(raw) || String(normHint || '').trim();
+    if (!normalized) return false;
+    if (/^(?:יהוה|יקוק|השם|אדני)$/i.test(normalized)) return true;
+    if (/^י{2,4}$/i.test(normalized)) return true;
+    if (/^ה['"`\u2018\u2019\u201C\u201D\u05F3\u05F4]$/i.test(rawCompact)) return true;
+    return false;
+  }
 
   function normalizeToken(t) {
-    return String(t || '')
+    var normalized = stripFootnoteRefs(String(t || ''))
       .toLowerCase()
       .replace(/[\u0591-\u05c7]/g, '')
       .replace(/[?]/g, '?')
@@ -26,6 +50,7 @@
       .replace(/["'.,;:!?()\[\]{}<>\-_\/\\|]+/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
+    return isDivineNameToken(t, normalized) ? '__DIVINE_NAME__' : normalized;
   }
 
   function tokenizeText(txt) {

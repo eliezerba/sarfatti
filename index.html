@@ -43,6 +43,7 @@ const { useState, useMemo, useEffect, useRef } = React;
 ═══════════════════════════════════════════════════════════ */
 const MSS_ID    = "1aD77sj5VrMVMx_fNw0lXY7ljbEUQjpASL-Hmz9mGlK8";
 const IGERET_ID = "1Qc09m0bK0EJiWnQUZe4k9TfiCPz-NISHqswfo_P4sAc";
+const SYNOPSIS_SHEETS = ['1', '2', '4', '5'];
 
 /* ═══════════════════════════════════════════════════════════
    JSONP FETCH  — injects a <script> tag, so no CORS needed.
@@ -108,12 +109,33 @@ const cellNum = (row, idx) => {
 const IGNORE_PUNCT_RE = /['"`\u2018\u2019\u201C\u201D\u05F3\u05F4]/g;
 const IGNORE_PUNCT_TEST_RE = /['"`\u2018\u2019\u201C\u201D\u05F3\u05F4]/;
 const stripIgnoredPunct = s => String(s || '').replace(IGNORE_PUNCT_RE, '');
+const stripFootnoteRefs = s => String(s || '').replace(/\[\d+\]/g, '');
 const isIgnoredToken = (raw, norm) => norm === '\u05db\u05d5' && IGNORE_PUNCT_TEST_RE.test(String(raw || ''));
 const isMinorPunctDiff = (a, b) => {
-    const sa = stripIgnoredPunct(a);
-    const sb = stripIgnoredPunct(b);
+    const sa = stripIgnoredPunct(stripFootnoteRefs(a));
+    const sb = stripIgnoredPunct(stripFootnoteRefs(b));
     return sa && sb && sa === sb && String(a || '') !== String(b || '');
 };
+const normalizeDivineRaw = s => stripFootnoteRefs(s)
+    .toLowerCase()
+    .replace(/[\u0591-\u05c7]/g, '')
+    .replace(/[ך]/g, 'כ')
+    .replace(/[ם]/g, 'מ')
+    .replace(/[ן]/g, 'נ')
+    .replace(/[ף]/g, 'פ')
+    .replace(/[ץ]/g, 'צ')
+    .replace(/['"`\u2018\u2019\u201C\u201D\u05F3\u05F4.,;:!?()[\]{}<>\-_/\\|]/g, '')
+    .trim();
+const isDivineNameToken = (raw, normHint = '') => {
+    const rawCompact = stripFootnoteRefs(String(raw || '')).replace(/[\u0591-\u05c7\s]/g, '');
+    const normalized = normalizeDivineRaw(raw) || String(normHint || '').trim();
+    if (!normalized) return false;
+    if (/^(?:יהוה|יקוק|השם|אדני)$/i.test(normalized)) return true;
+    if (/^י{2,4}$/i.test(normalized)) return true;
+    if (/^ה['"`\u2018\u2019\u201C\u201D\u05F3\u05F4]$/i.test(rawCompact)) return true;
+    return false;
+};
+const isDivineNameDiff = (a, b) => isDivineNameToken(a) && isDivineNameToken(b) && stripFootnoteRefs(a) !== stripFootnoteRefs(b);
 
 const msKey  = (lib, num) => `${lib}::${num}`;
 const shortLib = lib => {
@@ -457,6 +479,158 @@ function parseIgeret2(resp) {
     };
 }
 
+function buildKnownManuscripts(mssData = [], orderData = []) {
+    const seen = new Set();
+    const out = [];
+    [...mssData, ...orderData].forEach(ms => {
+        const library = String(ms?.library || '').trim();
+        const number = String(ms?.number || '').trim();
+        if (!library && !number) return;
+        const normKey = normalizedMsKey(library, number);
+        if (seen.has(normKey)) return;
+        seen.add(normKey);
+        out.push({ library, number });
+    });
+    return out;
+}
+
+function parseSynopsisMsHeader(label, knownManuscripts = []) {
+    const headerLabel = cleanLabel(label || '');
+    const headerNorm = normalizeMsPart(headerLabel);
+    let best = null;
+
+    knownManuscripts.forEach(ms => {
+        const libNorm = normalizeMsPart(ms.library);
+        const numNorm = normalizeMsPart(ms.number);
+        const comboNorm = normalizeMsPart(`${ms.library} ${ms.number}`);
+        let score = 0;
+
+        if (headerNorm && comboNorm && (headerNorm === comboNorm || headerNorm.includes(comboNorm) || comboNorm.includes(headerNorm))) {
+            score = comboNorm.length + 1000;
+        } else if (headerNorm && libNorm && numNorm && headerNorm.includes(libNorm) && headerNorm.includes(numNorm)) {
+            score = libNorm.length + numNorm.length;
+        } else if (headerNorm && libNorm && headerNorm.includes(libNorm)) {
+            score = libNorm.length;
+        }
+
+        if (!best || score > best.score) {
+            best = { score, library: ms.library, number: ms.number };
+        }
+    });
+
+    if (best && best.score > 0) {
+        return {
+            headerLabel,
+            library: best.library,
+            number: best.number,
+            key: msKey(best.library, best.number),
+        };
+    }
+
+    const fallback = headerLabel.match(/^(.*?)(?:\s*,\s*|\s+)((?:Ms|Cod)\.?\s+.+)$/i);
+    const library = fallback ? fallback[1].trim() : headerLabel;
+    const number = fallback ? fallback[2].trim() : '';
+    return { headerLabel, library, number, key: msKey(library, number || headerLabel) };
+}
+
+function parseSynopsisCollection(entries, knownManuscripts = []) {
+    const storyRows = [];
+    const sheetAudits = [];
+    let totalRows = 0;
+    let keptRows = 0;
+    let droppedRows = 0;
+
+    entries.forEach(({ sheetId, resp }) => {
+        const cols = resp?.table?.cols || [];
+        const rows = resp?.table?.rows || [];
+        const manuscripts = cols
+            .map((c, idx) => {
+                if (idx < 2) return null;
+                const label = cleanLabel(c?.label || '');
+                const hasAnyValue = rows.some(r => String(cellStr(r, idx) || '').trim());
+                if (!label && !hasAnyValue) return null;
+                return { ...parseSynopsisMsHeader(label, knownManuscripts), colIdx: idx };
+            })
+            .filter(Boolean);
+
+        const noteMaps = {};
+        const audit = {
+            sheetId,
+            totalRows: rows.length,
+            keptRows: 0,
+            droppedRows: 0,
+            droppedReasons: {
+                blankRow: 0,
+                footnoteRow: 0,
+                noWitnessText: 0,
+            },
+        };
+
+        manuscripts.forEach(ms => { noteMaps[ms.key] = {}; });
+
+        rows.forEach((r, idx) => {
+            const storyNum = cellNum(r, 0);
+            const sectionNum = cellNum(r, 1);
+            const cellTexts = manuscripts
+                .map(ms => ({ ms, text: cellStr(r, ms.colIdx) }))
+                .filter(item => String(item.text || '').trim());
+
+            if (!cellTexts.length) {
+                audit.droppedRows++;
+                audit.droppedReasons.blankRow++;
+                return;
+            }
+
+            const footnoteCells = cellTexts.filter(item => /^\[\d+\]/.test(String(item.text || '').trim()));
+            if (storyNum == null && sectionNum == null && footnoteCells.length) {
+                footnoteCells.forEach(({ ms, text }) => {
+                    const m = String(text || '').trim().match(/^\[(\d+)\]\s*(.*)$/);
+                    if (!m) return;
+                    noteMaps[ms.key][m[1]] = m[2].trim();
+                });
+                audit.droppedRows++;
+                audit.droppedReasons.footnoteRow++;
+                return;
+            }
+
+            if (storyNum == null || sectionNum == null) {
+                audit.droppedRows++;
+                audit.droppedReasons.noWitnessText++;
+                return;
+            }
+
+            cellTexts.forEach(({ ms, text }) => {
+                storyRows.push({
+                    library: ms.library,
+                    number: ms.number,
+                    storyNum,
+                    sectionNum,
+                    text,
+                    notes: noteMaps[ms.key],
+                    _sourceSheet: String(sheetId),
+                    _sourceRow: idx + 1,
+                });
+                audit.keptRows++;
+            });
+        });
+
+        totalRows += audit.totalRows;
+        keptRows += audit.keptRows;
+        droppedRows += audit.droppedRows;
+        sheetAudits.push(audit);
+    });
+
+    return {
+        rows: storyRows,
+        audit: {
+            totalRows,
+            keptRows,
+            droppedRows,
+            sheets: sheetAudits,
+        },
+    };
+}
+
 function parseMssSupplement(resp) {
     if (!resp?.table?.rows?.length) return new Map();
     const cols = resp.table.cols || [];
@@ -538,7 +712,8 @@ function normalizeToken(t) {
     if (window.SarfattiAlignment?.normalizeToken) {
         return window.SarfattiAlignment.normalizeToken(t);
     }
-    return (t || '')
+    const raw = stripFootnoteRefs(t || '');
+    const normalized = raw
         .toLowerCase()
         .replace(/[\u0591-\u05c7]/g, '')
         .replace(/[ך]/g, 'כ')
@@ -550,6 +725,7 @@ function normalizeToken(t) {
         .replace(/['"`\u2018\u2019\u201C\u201D\u05f3\u05f4]/g, '')
         .replace(/["'`\u2018\u2019\u201C\u201D\u05f3\u05f4.,;:!?()[\]{}<>\-_/\\|]+/g, '')
         .trim();
+    return isDivineNameToken(raw, normalized) ? '__DIVINE_NAME__' : normalized;
 }
 
 function tokenizeText(txt) {
@@ -643,7 +819,9 @@ function wordLevelWitnessDiff(baseText, witnessText) {
     let j = 0;
     while (i < n && j < m) {
         if (baseSeq[i].norm === witnessSeq[j].norm) {
-            const kind = isMinorPunctDiff(baseSeq[i].raw, witnessSeq[j].raw) ? 'minor' : 'shared';
+            const kind = (isMinorPunctDiff(baseSeq[i].raw, witnessSeq[j].raw) || isDivineNameDiff(baseSeq[i].raw, witnessSeq[j].raw))
+                ? 'minor'
+                : 'shared';
             coreOutByIdx[j] = { raw: witnessSeq[j].raw, kind };
             i++;
             j++;
@@ -681,6 +859,90 @@ function wordLevelWitnessDiff(baseText, witnessText) {
     const addedCount = tokens.reduce((s, t) => s + (t.kind === 'added' ? 1 : 0), 0);
     const minorCount = tokens.reduce((s, t) => s + (t.kind === 'minor' ? 1 : 0), 0);
     return { tokens, removedWords, removedCount: removedWords.length, addedCount, minorCount };
+}
+
+function splitDisplayText(text) {
+    const src = String(text || '');
+    const out = [];
+    let i = 0;
+
+    while (i < src.length) {
+        if (src.startsWith('[[', i)) {
+            const end = src.indexOf(']]', i + 2);
+            if (end >= 0) {
+                out.push({ type: 'supplement', text: src.slice(i, end + 2) });
+                i = end + 2;
+                continue;
+            }
+        }
+
+        if (src[i] === '[') {
+            const end = src.indexOf(']', i + 1);
+            if (end >= 0) {
+                const body = src.slice(i + 1, end).trim();
+                if (/^\d+$/.test(body)) {
+                    out.push({ type: 'footnote', ref: body, raw: src.slice(i, end + 1) });
+                } else {
+                    out.push({ type: 'supplement', text: src.slice(i, end + 1) });
+                }
+                i = end + 1;
+                continue;
+            }
+        }
+
+        if (src[i] === '<') {
+            const end = src.indexOf('>', i + 1);
+            if (end >= 0) {
+                out.push({ type: 'correction', text: src.slice(i, end + 1) });
+                i = end + 1;
+                continue;
+            }
+        }
+
+        let next = src.length;
+        ['[[', '[', '<'].forEach(marker => {
+            const pos = src.indexOf(marker, i + 1);
+            if (pos >= 0 && pos < next) next = pos;
+        });
+        out.push({ type: 'plain', text: src.slice(i, next) });
+        i = next;
+    }
+
+    return out;
+}
+
+function renderDisplayText(text, notes = {}, opts = {}) {
+    const { showSupplements = true, showCorrections = true, keyPrefix = 'disp' } = opts;
+    return splitDisplayText(text).map((part, idx) => {
+        if (part.type === 'supplement') {
+            if (!showSupplements) return null;
+            return (
+                <span key={`${keyPrefix}-${idx}`} className="rounded bg-sky-100 px-0.5 text-sky-900 ring-1 ring-sky-200">
+                    {part.text}
+                </span>
+            );
+        }
+        if (part.type === 'correction') {
+            if (!showCorrections) return null;
+            return (
+                <span key={`${keyPrefix}-${idx}`} className="rounded bg-violet-100 px-0.5 text-violet-900 ring-1 ring-violet-200">
+                    {part.text}
+                </span>
+            );
+        }
+        if (part.type === 'footnote') {
+            const noteText = notes?.[part.ref] || part.raw;
+            return (
+                <sup
+                    key={`${keyPrefix}-${idx}`}
+                    title={noteText}
+                    className="mx-0.5 cursor-help rounded bg-slate-200 px-1 text-[10px] font-semibold text-slate-700">
+                    {part.ref}
+                </sup>
+            );
+        }
+        return <React.Fragment key={`${keyPrefix}-${idx}`}>{part.text}</React.Fragment>;
+    });
 }
 
 function splitSynopsisText(txt) {
@@ -947,7 +1209,7 @@ const STRINGS = {
   tabTexts:    { he: 'טקסטים',                                     en: 'Texts' },
   langBtn:     { he: 'English',                                    en: '\u05e2\u05d1\u05e8\u05d9\u05ea' },
   loadingTitle:{ he: 'טוען נתונים מ-Google Sheets\u2026',         en: 'Loading data from Google Sheets\u2026' },
-  loadingSub:  { he: 'שלושה גיליונות נטענים במקביל',               en: 'Three sheets loading in parallel' },
+  loadingSub:  { he: 'כמה גיליונות נטענים במקביל',               en: 'Several sheets loading in parallel' },
   errTitle:    { he: 'שגיאות טעינה:',                              en: 'Loading errors:' },
   errHint:     { he: 'ודא שהגיליונות משותפים לציבור ("כל אחד עם הקישור") וכי יש חיבור לאינטרנט.', en: 'Ensure sheets are publicly shared ("anyone with the link") and that you have internet access.' },
   viewTable:   { he: '\u25c9 טבלת מצאי',                           en: '\u25c9 Table' },
@@ -2304,8 +2566,8 @@ function StoryOrderTab({ orderData, lang, onOpenTextStory, storiesWithFullText =
                                                 <button
                                                     onClick={() => onOpenTextStory && onOpenTextStory(row.num)}
                                                     className="text-[10px] text-indigo-600 hover:text-indigo-800 hover:underline mt-0.5"
-                                                    title={lang === 'en' ? 'Open full text in Texts tab' : 'פתח טקסט מלא בלשונית הטקסטים'}>
-                                                    {lang === 'en' ? 'Full text' : 'לטקסט המלא'}
+                                                    title={lang === 'en' ? 'Open synopsis in Texts tab' : 'פתח את הסינופסיס בלשונית הטקסטים'}>
+                                                    {lang === 'en' ? 'Synopsis' : 'לסינופסיס'}
                                                 </button>
                                             )}
                                         </td>
@@ -3314,6 +3576,571 @@ function TextsTab({ textsData, textsAudit, orderData, lang, jumpStory }) {
 /* ═══════════════════════════════════════════════════════════
    ROOT APP
 ═══════════════════════════════════════════════════════════ */
+function TextsTabV2({ textsData, textsAudit, orderData, lang, jumpStory }) {
+    const [textsInnerTab, setTextsInnerTab] = useState('stories');
+    const [treeBasis, setTreeBasis] = useState('story');
+    const [selectedStory, setSelectedStory] = useState(null);
+    const [selectedKeys, setSelectedKeys] = useState([]);
+    const [baseSynopsisKey, setBaseSynopsisKey] = useState('');
+    const [treeZoom, setTreeZoom] = useState(1);
+    const [msReadKey, setMsReadKey] = useState('');
+    const [selectedSegIdx, setSelectedSegIdx] = useState(null);
+    const [showSupplements, setShowSupplements] = useState(true);
+    const [showCorrections, setShowCorrections] = useState(true);
+
+    const storyNames = useMemo(() => {
+        const m = {};
+        orderData.forEach(r => {
+            if (r.sarfattiNum == null) return;
+            const name = (r.storyName || r.storyNameRaw || r.incipit || '').trim();
+            if (!name) return;
+            if (!m[r.sarfattiNum]) m[r.sarfattiNum] = name;
+        });
+        return m;
+    }, [orderData]);
+
+    const storyNums = useMemo(() =>
+        [...new Set(textsData.map(t => t.storyNum).filter(n => n != null))].sort((a, b) => a - b),
+    [textsData]);
+
+    const msList = useMemo(() => {
+        const seen = new Set();
+        const out = [];
+        textsData.forEach(t => {
+            const key = msKey(t.library, t.number);
+            if (seen.has(key)) return;
+            seen.add(key);
+            out.push({ key, library: t.library, number: t.number });
+        });
+        return out;
+    }, [textsData]);
+
+    const sheetAuditRows = useMemo(() => {
+        const sheets = textsAudit?.sheets || [];
+        return sheets.map(s => ({
+            sheetId: s.sheetId,
+            keptRows: s.keptRows,
+            totalRows: s.totalRows,
+            footnoteRows: s.droppedReasons?.footnoteRow || 0,
+        }));
+    }, [textsAudit]);
+
+    useEffect(() => {
+        setSelectedKeys(prev => {
+            const valid = prev.filter(k => msList.some(m => m.key === k));
+            if (valid.length) return valid;
+            return msList.slice(0, Math.min(4, msList.length)).map(m => m.key);
+        });
+    }, [msList]);
+
+    useEffect(() => {
+        if (selectedStory == null && storyNums.length) setSelectedStory(storyNums[0]);
+    }, [selectedStory, storyNums]);
+
+    useEffect(() => {
+        if (textsInnerTab === 'stories') setTreeBasis('story');
+    }, [textsInnerTab, selectedStory]);
+
+    useEffect(() => {
+        if (textsInnerTab === 'map') setTreeBasis('global');
+    }, [textsInnerTab]);
+
+    useEffect(() => {
+        if (jumpStory == null) return;
+        const target = Number(jumpStory);
+        if (!Number.isFinite(target)) return;
+        setTextsInnerTab('stories');
+        setSelectedStory(target);
+        setSelectedSegIdx(0);
+        setMsReadKey('');
+
+        const keys = [];
+        const seen = new Set();
+        textsData.forEach(t => {
+            if (t.storyNum !== target) return;
+            if (!String(t.text || '').trim()) return;
+            const key = msKey(t.library, t.number);
+            if (seen.has(key)) return;
+            seen.add(key);
+            keys.push(key);
+        });
+        if (keys.length) setSelectedKeys(keys);
+    }, [jumpStory, textsData]);
+
+    const textsByMs = useMemo(() => {
+        const out = {};
+        textsData.forEach(t => {
+            const key = msKey(t.library, t.number);
+            if (!out[key]) out[key] = {};
+            if (!out[key][t.storyNum]) out[key][t.storyNum] = { sections: {}, notes: {} };
+            out[key][t.storyNum].sections[t.sectionNum] = { text: t.text || '' };
+            out[key][t.storyNum].notes = { ...(out[key][t.storyNum].notes || {}), ...(t.notes || {}) };
+        });
+        Object.values(out).forEach(byStory => {
+            Object.values(byStory).forEach(entry => {
+                entry.sectionNums = Object.keys(entry.sections).map(Number).sort((a, b) => a - b);
+                entry.fullText = entry.sectionNums.map(num => entry.sections[num]?.text || '').filter(Boolean).join(' ');
+            });
+        });
+        return out;
+    }, [textsData]);
+
+    const selectedMs = useMemo(() =>
+        msList.filter(ms => selectedKeys.includes(ms.key)),
+    [msList, selectedKeys]);
+
+    const storySectionNums = useMemo(() => {
+        if (selectedStory == null) return [];
+        const nums = new Set();
+        selectedMs.forEach(ms => {
+            const entry = textsByMs[ms.key]?.[selectedStory];
+            (entry?.sectionNums || []).forEach(num => nums.add(num));
+        });
+        return [...nums].sort((a, b) => a - b);
+    }, [selectedStory, selectedMs, textsByMs]);
+
+    const synopsisRows = useMemo(() => {
+        if (selectedStory == null) return [];
+        return selectedMs
+            .map(ms => ({
+                ...ms,
+                text: textsByMs[ms.key]?.[selectedStory]?.fullText || '',
+                notes: textsByMs[ms.key]?.[selectedStory]?.notes || {},
+            }))
+            .filter(x => x.text);
+    }, [selectedStory, selectedMs, textsByMs]);
+
+    useEffect(() => {
+        if (!synopsisRows.length) {
+            setBaseSynopsisKey('');
+            return;
+        }
+        if (!baseSynopsisKey || !synopsisRows.some(r => r.key === baseSynopsisKey)) {
+            setBaseSynopsisKey(synopsisRows[0].key);
+        }
+    }, [synopsisRows, baseSynopsisKey]);
+
+    const synopsisByKey = useMemo(() => {
+        const m = {};
+        synopsisRows.forEach(r => { m[r.key] = r.text; });
+        return m;
+    }, [synopsisRows]);
+
+    const synopsisNotesByKey = useMemo(() => {
+        const m = {};
+        synopsisRows.forEach(r => { m[r.key] = r.notes || {}; });
+        return m;
+    }, [synopsisRows]);
+
+    const synopsisTableRows = useMemo(() => {
+        if (selectedStory == null) return [];
+        return storySectionNums.map((sectionNum, idx) => ({
+            segIdx: idx,
+            storyNum: selectedStory,
+            sectionNum,
+            cells: selectedMs.map(ms => ({
+                key: ms.key,
+                text: textsByMs[ms.key]?.[selectedStory]?.sections?.[sectionNum]?.text || '',
+                notes: textsByMs[ms.key]?.[selectedStory]?.notes || {},
+            })),
+        }));
+    }, [selectedStory, storySectionNums, selectedMs, textsByMs]);
+
+    useEffect(() => {
+        if (!synopsisTableRows.length) {
+            if (selectedSegIdx != null) setSelectedSegIdx(null);
+            return;
+        }
+        if (selectedSegIdx == null || selectedSegIdx >= synopsisTableRows.length) {
+            setSelectedSegIdx(0);
+        }
+    }, [synopsisTableRows, selectedSegIdx]);
+
+    useEffect(() => {
+        if (selectedSegIdx == null) return;
+        const el = document.querySelector(`[data-seg-idx="${selectedSegIdx}"]`);
+        if (el && el.scrollIntoView) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    }, [selectedSegIdx]);
+
+    const baseFullDiff = useMemo(() => {
+        if (!baseSynopsisKey) return [];
+        const baseText = synopsisByKey[baseSynopsisKey] || '';
+        return synopsisRows
+            .filter(r => r.key !== baseSynopsisKey)
+            .map(r => ({ ...r, ...textDiffProfile(baseText, r.text || ''), ...wordLevelWitnessDiff(baseText, r.text || '') }))
+            .sort((a, b) => b.score - a.score);
+    }, [baseSynopsisKey, synopsisByKey, synopsisRows]);
+
+    const msSequentialRows = useMemo(() => {
+        return selectedMs.map(ms => {
+            const seq = storyNums
+                .map(num => ({
+                    num,
+                    text: textsByMs[ms.key]?.[num]?.fullText || '',
+                    notes: textsByMs[ms.key]?.[num]?.notes || {},
+                }))
+                .filter(x => x.text);
+            return { ...ms, seq };
+        });
+    }, [selectedMs, storyNums, textsByMs]);
+
+    const msReadRow = useMemo(() => (
+        msSequentialRows.find(ms => ms.key === msReadKey) || null
+    ), [msSequentialRows, msReadKey]);
+
+    useEffect(() => {
+        if (msReadKey && !selectedKeys.includes(msReadKey)) setMsReadKey('');
+    }, [msReadKey, selectedKeys]);
+
+    const pairDist = useMemo(() => {
+        const dStory = {};
+        const dGlobal = {};
+        const keyAt = idx => selectedMs[idx]?.key;
+        const globalCorpus = {};
+        selectedMs.forEach(ms => {
+            globalCorpus[ms.key] = storyNums
+                .map(num => textsByMs[ms.key]?.[num]?.fullText || '')
+                .filter(Boolean)
+                .join(' ');
+        });
+        for (let i = 0; i < selectedMs.length; i++) {
+            for (let j = i + 1; j < selectedMs.length; j++) {
+                const ki = keyAt(i), kj = keyAt(j);
+                const pairKey = `${ki}||${kj}`;
+                const storyA = selectedStory == null ? '' : (textsByMs[ki]?.[selectedStory]?.fullText || '');
+                const storyB = selectedStory == null ? '' : (textsByMs[kj]?.[selectedStory]?.fullText || '');
+                dStory[pairKey] = 1 - textJaccard(storyA, storyB);
+                dGlobal[pairKey] = 1 - textJaccard(globalCorpus[ki], globalCorpus[kj]);
+            }
+        }
+        return { dStory, dGlobal };
+    }, [selectedMs, selectedStory, storyNums, textsByMs]);
+
+    const mapPairwise = useMemo(() => {
+        const getDist = (ki, kj) => {
+            const pair = ki < kj ? `${ki}||${kj}` : `${kj}||${ki}`;
+            if (treeBasis === 'global') return pairDist.dGlobal[pair] ?? 1;
+            if (treeBasis === 'delta') return Math.abs((pairDist.dStory[pair] ?? 1) - (pairDist.dGlobal[pair] ?? 1));
+            return pairDist.dStory[pair] ?? 1;
+        };
+        return selectedMs.map((a, i) => selectedMs.map((b, j) => {
+            if (i === j) return { similarity: 1, distance: 0 };
+            const d = getDist(a.key, b.key);
+            return { similarity: Math.max(0, 1 - d), distance: d };
+        }));
+    }, [selectedMs, pairDist, treeBasis]);
+
+    const tree = useMemo(() => {
+        if (selectedMs.length < 2) return null;
+        const labels = selectedMs.map(ms => `${shortLib(ms.library)} (${ms.number})`);
+        const getDist = (i, j) => {
+            const ki = selectedMs[i].key;
+            const kj = selectedMs[j].key;
+            const pair = ki < kj ? `${ki}||${kj}` : `${kj}||${ki}`;
+            if (treeBasis === 'global') return pairDist.dGlobal[pair] ?? 1;
+            if (treeBasis === 'delta') return Math.abs((pairDist.dStory[pair] ?? 1) - (pairDist.dGlobal[pair] ?? 1));
+            return pairDist.dStory[pair] ?? 1;
+        };
+        return buildTreeFromDistance(labels, getDist);
+    }, [selectedMs, treeBasis, pairDist]);
+
+    const dendrogram = useMemo(() => {
+        if (!tree) return null;
+        const leaves = [];
+        const collectLeaves = node => {
+            if (!node) return;
+            if (node.label) {
+                leaves.push(node.label);
+                return;
+            }
+            collectLeaves(node.left);
+            collectLeaves(node.right);
+        };
+        collectLeaves(tree);
+        const leafCount = Math.max(2, leaves.length);
+        const width = Math.max(820, leafCount * 170);
+        const yTop = 30;
+        const yLeaf = 268;
+        const labelY = yLeaf + 18;
+        const height = labelY + 54;
+        const maxHeight = Math.max(0.001, tree.height || 1);
+        const yFor = h => yTop + ((maxHeight - (h || 0)) / maxHeight) * (yLeaf - yTop);
+        const xByLeaf = {};
+        leaves.forEach((label, idx) => {
+            xByLeaf[label] = 62 + (idx * (width - 124)) / Math.max(1, leaves.length - 1);
+        });
+        const branchPalette = ['#334155', '#0f766e', '#0369a1', '#6d28d9', '#be123c'];
+        const segments = [];
+        const nodes = [];
+        const labels = [];
+        const ticks = Array.from({ length: 6 }, (_, i) => {
+            const h = maxHeight - (maxHeight * i) / 5;
+            return { y: yFor(h), h };
+        });
+        const splitLabel = raw => {
+            const s = String(raw || '');
+            const idx = s.indexOf('(');
+            if (idx < 0) return { l1: s.slice(0, 24), l2: '' };
+            return { l1: s.slice(0, idx).trim().slice(0, 24), l2: s.slice(idx).trim().slice(0, 20) };
+        };
+        const layout = (node, depth = 0) => {
+            if (node.label) {
+                const x = xByLeaf[node.label];
+                const y = yFor(0);
+                labels.push({ x, y: labelY, ...splitLabel(node.label) });
+                return { x, y };
+            }
+            const left = layout(node.left, depth + 1);
+            const right = layout(node.right, depth + 1);
+            const y = yFor(node.height || 0);
+            const x = (left.x + right.x) / 2;
+            const col = branchPalette[depth % branchPalette.length];
+            const w = Math.max(1.2, 2.4 - depth * 0.2);
+            segments.push({ x1: left.x, y1: left.y, x2: left.x, y2: y, col, w });
+            segments.push({ x1: right.x, y1: right.y, x2: right.x, y2: y, col, w });
+            segments.push({ x1: Math.min(left.x, right.x), y1: y, x2: Math.max(left.x, right.x), y2: y, col, w });
+            nodes.push({ x, y, h: node.height || 0, col });
+            return { x, y };
+        };
+        layout(tree);
+        return { width, height, ticks, segments, nodes, labels, yLeaf };
+    }, [tree]);
+
+    const toggleMs = key => {
+        setSelectedKeys(prev => prev.includes(key)
+            ? prev.filter(x => x !== key)
+            : [...prev, key]);
+    };
+
+    if (!textsData.length) return (
+        <div className="h-full flex flex-col items-center justify-center gap-2 text-slate-400 text-sm">
+            <div>{T('noTexts', lang)}</div>
+        </div>
+    );
+
+    return (
+        <div className="flex h-full overflow-hidden">
+            <div className="w-72 border-l border-slate-200 bg-slate-50 flex flex-col shrink-0 overflow-hidden">
+                <div className="bg-slate-800 text-white text-xs font-semibold px-3 py-2.5 shrink-0">{lang === 'en' ? 'Texts and Synopsis' : 'טקסטים וסינופסיס'}</div>
+                <div className="p-2 border-b border-slate-200 bg-white space-y-2 shrink-0">
+                    {textsAudit && (
+                        <div className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-[10px] text-slate-600 leading-relaxed">
+                            <div className="font-semibold text-slate-700">{lang === 'en' ? 'Import audit' : 'בקרת ייבוא'}</div>
+                            <div>{lang === 'en' ? `${textsAudit.keptRows}/${textsAudit.totalRows} visible rows` : `${textsAudit.keptRows}/${textsAudit.totalRows} שורות תצוגה`}</div>
+                            {sheetAuditRows.length > 0 && <div>{sheetAuditRows.map(r => `#${r.sheetId}: ${r.keptRows}/${r.totalRows} | fn:${r.footnoteRows}`).join(' | ')}</div>}
+                        </div>
+                    )}
+                    <div className="text-[10px] text-slate-500">{textsInnerTab === 'stories' ? (lang === 'en' ? 'Synopsis by story and section' : 'סינופסיס לפי סיפור וסעיף') : (lang === 'en' ? 'Distance map by manuscript' : 'מפת מרחקים בין כתבי יד')}</div>
+                    <select value={selectedStory ?? ''} onChange={e => setSelectedStory(Number(e.target.value))} className="w-full border border-slate-300 rounded px-2 py-1 text-xs bg-white">
+                        {storyNums.map(n => (
+                            <option key={n} value={n}>{`${lang === 'en' ? 'Story' : 'סיפור'} ${n} — ${storyNames[n] || ''}`}</option>
+                        ))}
+                    </select>
+                    {textsInnerTab === 'stories' && (
+                        <>
+                            <select value={baseSynopsisKey} onChange={e => setBaseSynopsisKey(e.target.value)} className="w-full border border-slate-300 rounded px-2 py-1 text-xs bg-white">
+                                {synopsisRows.map(r => (
+                                    <option key={r.key} value={r.key}>{`${shortLib(r.library)} (${r.number})`}</option>
+                                ))}
+                            </select>
+                            <select value={selectedSegIdx == null ? '' : selectedSegIdx} onChange={e => setSelectedSegIdx(e.target.value === '' ? null : Number(e.target.value))} className="w-full border border-slate-300 rounded px-2 py-1 text-xs bg-white">
+                                <option value="">{lang === 'en' ? 'Jump to section…' : 'קפוץ לסעיף…'}</option>
+                                {synopsisTableRows.map(row => (
+                                    <option key={`seg-${row.segIdx}`} value={row.segIdx}>{`${lang === 'en' ? 'Story' : 'סיפור'} ${row.storyNum} · ${lang === 'en' ? 'Section' : 'סעיף'} ${row.sectionNum}`}</option>
+                                ))}
+                            </select>
+                            <div className="grid grid-cols-2 gap-2 text-[11px]">
+                                <label className="flex items-center gap-2 rounded border border-slate-200 bg-slate-50 px-2 py-1"><input type="checkbox" checked={showSupplements} onChange={e => setShowSupplements(e.target.checked)} /><span>{lang === 'en' ? 'Show []' : 'הצג []'}</span></label>
+                                <label className="flex items-center gap-2 rounded border border-slate-200 bg-slate-50 px-2 py-1"><input type="checkbox" checked={showCorrections} onChange={e => setShowCorrections(e.target.checked)} /><span>{lang === 'en' ? 'Show <>' : 'הצג <>'}</span></label>
+                            </div>
+                        </>
+                    )}
+                </div>
+                <div className="px-3 py-2 text-[11px] text-slate-500 border-b border-slate-200 shrink-0">{lang === 'en' ? `Select manuscripts (${selectedKeys.length})` : `בחר כתבי יד (${selectedKeys.length})`}</div>
+                <div className="overflow-y-auto flex-1 px-2 py-2 space-y-1">
+                    {msList.map(ms => {
+                        const checked = selectedKeys.includes(ms.key);
+                        return (
+                            <label key={ms.key} className={`flex items-start gap-2 rounded px-2 py-1.5 cursor-pointer ${checked ? 'bg-indigo-50' : 'hover:bg-white'}`}>
+                                <input type="checkbox" checked={checked} onChange={() => toggleMs(ms.key)} className="mt-0.5" />
+                                <span className="text-xs leading-snug"><span className="block text-slate-700">{shortLib(ms.library)}</span><span className="block text-[10px] text-slate-400">{ms.number}</span></span>
+                            </label>
+                        );
+                    })}
+                </div>
+            </div>
+            <div className="flex-1 overflow-auto p-4 bg-white space-y-4">
+                <div className="flex justify-center">
+                    <div className="inline-flex rounded-lg border border-slate-300 overflow-hidden bg-white text-xs">
+                        <button onClick={() => setTextsInnerTab('stories')} className={`px-3 py-1.5 ${textsInnerTab === 'stories' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>{lang === 'en' ? 'Stories' : 'סיפורים'}</button>
+                        <button onClick={() => setTextsInnerTab('map')} className={`px-3 py-1.5 ${textsInnerTab === 'map' ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>{lang === 'en' ? 'General Map' : 'מפה כללית'}</button>
+                    </div>
+                </div>
+                {textsInnerTab === 'stories' ? (
+                    <div>
+                        <div className="mb-4">
+                            <h2 className="text-lg font-bold text-slate-800 heb">{selectedStory == null ? '' : (storyNames[selectedStory] || `${lang === 'en' ? 'Story' : 'סיפור'} ${selectedStory}`)}</h2>
+                            <p className="text-slate-400 text-sm">{lang === 'en' ? 'The synopsis is shown by the sheet units themselves: A = story number, B = section number.' : 'הסינופסיס מוצג לפי יחידות הגיליון עצמו: A = מספר סיפור, B = מספר סעיף.'}</p>
+                            <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-slate-600">
+                                <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5"><span className="inline-block rounded bg-sky-100 px-1 text-sky-900">[]</span>{lang === 'en' ? 'editorial supplement' : 'השלמת מהדירים'}</span>
+                                <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5"><span className="inline-block rounded bg-violet-100 px-1 text-violet-900">&lt;&gt;</span>{lang === 'en' ? 'marginal correction' : 'הגהה בצד הטקסט'}</span>
+                                <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5"><span className="inline-block rounded bg-slate-200 px-1 text-slate-700">1</span>{lang === 'en' ? 'footnote hover' : 'הערת שוליים במעבר עכבר'}</span>
+                                <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5"><span className="inline-block w-2 h-2 rounded bg-amber-300" />{lang === 'en' ? 'geresh/gershayim and divine-name markers shown, not counted' : 'גרש/גרשיים וסימוני שם ה׳ מוצגים אך לא נספרים'}</span>
+                            </div>
+                        </div>
+                        {synopsisRows.length === 0 ? (
+                            <div className="text-sm text-slate-400">{lang === 'en' ? 'No texts are available for the selected story in the selected manuscripts.' : 'אין טקסטים זמינים לסיפור שנבחר בכתבי היד המסומנים.'}</div>
+                        ) : (
+                            <div className="space-y-3">
+                                <div className="rounded-xl border border-slate-200 overflow-auto max-h-[60vh]">
+                                    <table className="text-xs border-collapse min-w-[920px] w-full">
+                                        <thead className="sticky top-0 z-10 bg-slate-800 text-white">
+                                            <tr>
+                                                <th className="px-2 py-2 text-center border-l border-slate-600 min-w-[48px]">A</th>
+                                                <th className="px-2 py-2 text-center border-l border-slate-600 min-w-[48px]">B</th>
+                                                {synopsisRows.map(r => {
+                                                    const profile = textDiffProfile(synopsisByKey[baseSynopsisKey] || '', synopsisByKey[r.key] || '');
+                                                    return (
+                                                        <th key={r.key} onClick={() => setMsReadKey(r.key)} className={`px-2 py-2 text-right border-l border-slate-600 min-w-[230px] align-bottom cursor-pointer hover:bg-slate-700/40 ${msReadKey === r.key ? 'bg-slate-700/60' : ''}`}>
+                                                            <div className="text-[11px] leading-tight">{shortLib(r.library)}</div>
+                                                            <div className="text-[10px] text-slate-300 mt-0.5">{r.number}</div>
+                                                            <div className={`inline-block mt-1 text-[9px] rounded px-1.5 py-0.5 ${r.key === baseSynopsisKey ? 'bg-indigo-500 text-white' : profile.score > 0.82 ? 'bg-emerald-500 text-white' : profile.score > 0.62 ? 'bg-amber-500 text-white' : 'bg-rose-500 text-white'}`}>{r.key === baseSynopsisKey ? (lang === 'en' ? 'Base' : 'בסיס') : `${lang === 'en' ? 'Similarity' : 'דמיון'} ${Math.round(profile.score * 100)}%`}</div>
+                                                        </th>
+                                                    );
+                                                })}
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {synopsisTableRows.map(row => {
+                                                const baseCell = row.cells.find(c => c.key === baseSynopsisKey)?.text || '';
+                                                const baseNotes = synopsisNotesByKey[baseSynopsisKey] || {};
+                                                return (
+                                                    <tr key={row.segIdx} data-seg-idx={row.segIdx} className={`border-b border-slate-100 align-top hover:bg-slate-50 ${row.segIdx === selectedSegIdx ? 'bg-indigo-50/60' : ''}`}>
+                                                        <td className="px-2 py-2 text-center text-slate-400 font-mono border-l border-slate-100">{row.storyNum}</td>
+                                                        <td className="px-2 py-2 text-center text-slate-400 font-mono border-l border-slate-100">{row.sectionNum}</td>
+                                                        {row.cells.map(cell => {
+                                                            const profile = cell.key === baseSynopsisKey ? { score: 1, added: 0, removed: 0 } : textDiffProfile(baseCell, cell.text);
+                                                            const wordDiff = cell.key === baseSynopsisKey ? null : wordLevelWitnessDiff(baseCell, cell.text);
+                                                            const cls = profile.score > 0.9 ? 'bg-white text-slate-700' : profile.score > 0.7 ? 'bg-amber-50 text-amber-900' : 'bg-rose-50 text-rose-900';
+                                                            return (
+                                                                <td key={cell.key} className={`px-2 py-2 border-l border-slate-100 leading-relaxed heb text-justify ${cls}`}>
+                                                                    {cell.key === baseSynopsisKey ? (
+                                                                        cell.text ? renderDisplayText(cell.text, cell.notes, { showSupplements, showCorrections, keyPrefix: `${cell.key}-${row.segIdx}-base` }) : <span className="text-slate-300">ֲ·</span>
+                                                                    ) : cell.text ? (
+                                                                        <span>
+                                                                            {wordDiff.tokens.map((tok, idx) => (
+                                                                                <React.Fragment key={`${cell.key}-${row.segIdx}-${idx}`}>
+                                                                                    <span className={tok.kind === 'added' ? 'bg-rose-200 text-rose-900 rounded px-0.5' : tok.kind === 'minor' ? 'bg-amber-200 text-amber-900 rounded px-0.5' : ''}>{renderDisplayText(tok.raw, cell.notes, { showSupplements, showCorrections, keyPrefix: `${cell.key}-${row.segIdx}-${idx}` })}</span>
+                                                                                    {idx < wordDiff.tokens.length - 1 ? ' ' : ''}
+                                                                                </React.Fragment>
+                                                                            ))}
+                                                                        </span>
+                                                                    ) : <span className="text-slate-300">ֲ·</span>}
+                                                                    {cell.key !== baseSynopsisKey && cell.text && <div className="mt-1 text-[9px] text-slate-500 not-italic" dir="ltr">seg +{profile.added} -{profile.removed} · words +{wordDiff.addedCount} -{wordDiff.removedCount}</div>}
+                                                                    {cell.key !== baseSynopsisKey && wordDiff && wordDiff.removedWords.length > 0 && (
+                                                                        <div className="mt-1 text-[9px] text-slate-500 leading-snug not-italic" dir="ltr">base-only:{' '}{wordDiff.removedWords.slice(0, 8).map((w, idx) => <span key={`${cell.key}-${row.segIdx}-rm-${idx}`} className="line-through text-rose-700 mr-1">{renderDisplayText(w, baseNotes, { showSupplements, showCorrections, keyPrefix: `${cell.key}-${row.segIdx}-rm-${idx}` })}</span>)}{wordDiff.removedWords.length > 8 ? ' ...' : ''}</div>
+                                                                    )}
+                                                                </td>
+                                                            );
+                                                        })}
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                {msReadRow && (
+                                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                                        <div className="flex items-center justify-between gap-2 mb-2">
+                                            <div>
+                                                <div className="text-sm font-semibold text-slate-700">{lang === 'en' ? 'Manuscript reading' : 'קריאה לפי כתב יד'}</div>
+                                                <div className="text-[11px] text-slate-500">{shortLib(msReadRow.library)} | {msReadRow.number}</div>
+                                            </div>
+                                            <button onClick={() => setMsReadKey('')} className="text-[11px] text-slate-500 hover:text-slate-700">{lang === 'en' ? 'Close' : 'סגור'}</button>
+                                        </div>
+                                        <div className="rounded-lg border border-slate-200 bg-white max-h-[380px] overflow-y-auto">
+                                            {msReadRow.seq.map(row => (
+                                                <div key={`msread-${msReadRow.key}-${row.num}`} className={`p-3 border-b border-slate-100 last:border-b-0 ${row.num === selectedStory ? 'bg-indigo-50/60' : ''}`}>
+                                                    <div className="text-[11px] text-indigo-600 font-semibold mb-1">{lang === 'en' ? `Story ${row.num}` : `סיפור ${row.num}`} {storyNames[row.num] ? `— ${storyNames[row.num]}` : ''}</div>
+                                                    <p className="text-sm leading-relaxed text-slate-800 heb text-justify">{renderDisplayText(row.text, row.notes, { showSupplements, showCorrections, keyPrefix: `${msReadRow.key}-${row.num}` })}</p>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                                    <div className="flex items-center justify-between gap-2 mb-2">
+                                        <div className="text-sm font-semibold text-slate-700">{lang === 'en' ? 'Story manuscript tree' : 'עץ כתבי יד לסיפור'}</div>
+                                        <div className="flex items-center gap-2 text-xs">
+                                            <label className="text-[11px] text-slate-500">{lang === 'en' ? 'Zoom' : 'זום'}</label>
+                                            <input type="range" min="0.7" max="1.8" step="0.1" value={treeZoom} onChange={e => setTreeZoom(Number(e.target.value))} />
+                                        </div>
+                                    </div>
+                                    {selectedMs.length < 2 ? (
+                                        <div className="text-xs text-slate-400">{lang === 'en' ? 'Select at least two manuscripts to show a tree.' : 'בחר לפחות שני כתבי יד כדי להציג עץ.'}</div>
+                                    ) : !dendrogram ? (
+                                        <div className="text-xs text-slate-400">{lang === 'en' ? 'Tree could not be computed for current selection.' : 'לא ניתן לחשב עץ עבור הבחירה הנוכחית.'}</div>
+                                    ) : (
+                                        <div className="bg-white rounded-lg border border-slate-200 p-3 overflow-auto">
+                                            <svg viewBox={`0 0 ${dendrogram.width} ${dendrogram.height}`} width="100%" height={Math.min(520, dendrogram.height)} className="min-w-[760px]" style={{ transform: `scale(${treeZoom})`, transformOrigin: 'top center' }}>
+                                                {dendrogram.ticks.map((t, i) => <g key={`tick-s-${i}`}><line x1={26} y1={t.y} x2={dendrogram.width - 26} y2={t.y} stroke="#e2e8f0" strokeWidth="1" /><text x={28} y={t.y - 3} fontSize="9" fill="#94a3b8">d={t.h.toFixed(2)}</text></g>)}
+                                                {dendrogram.segments.map((s, i) => <line key={`br-s-${i}`} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke={s.col} strokeWidth={s.w} strokeLinecap="round" opacity="0.9" />)}
+                                                {dendrogram.nodes.map((n, i) => <g key={`nd-s-${i}`}><circle cx={n.x} cy={n.y} r="3.1" fill={n.col} stroke="#0f172a" strokeWidth="0.5" /><rect x={n.x - 13} y={n.y - 14} width="26" height="10" rx="3" fill="white" opacity="0.94" /><text x={n.x - 11} y={n.y - 6} fontSize="8.5" fill="#64748b">{n.h.toFixed(2)}</text></g>)}
+                                                {dendrogram.labels.map((lb, i) => <line key={`st-s-${i}`} x1={lb.x} y1={dendrogram.yLeaf} x2={lb.x} y2={lb.y - 4} stroke="#cbd5e1" strokeWidth="1" />)}
+                                                {dendrogram.labels.map((lb, i) => <g key={`lb-s-${i}`}><rect x={lb.x - 72} y={lb.y} width="144" height="34" rx="6" fill="#f8fafc" stroke="#e2e8f0" /><text x={lb.x} y={lb.y + 12} fontSize="10" fill="#0f172a" textAnchor="middle">{lb.l1}</text>{lb.l2 && <text x={lb.x} y={lb.y + 24} fontSize="9" fill="#64748b" textAnchor="middle">{lb.l2}</text>}</g>)}
+                                            </svg>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                ) : (
+                    <div className="space-y-4">
+                        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                            <div className="flex items-center justify-between gap-3 flex-wrap">
+                                <div>
+                                    <div className="text-sm font-semibold text-slate-700">{lang === 'en' ? 'Manuscript distance basis' : 'בסיס חישוב המרחק בין כתבי היד'}</div>
+                                    <div className="text-[11px] text-slate-500 mt-0.5">{treeBasis === 'story' ? (lang === 'en' ? 'Current story only' : 'הסיפור הנבחר בלבד') : treeBasis === 'global' ? (lang === 'en' ? 'All loaded texts by manuscript' : 'כל הטקסטים הטעונים לכל כתב יד') : (lang === 'en' ? 'Gap between story-local and global similarity' : 'פער בין דמיון מקומי של הסיפור לדמיון כללי')}</div>
+                                </div>
+                                <div className="flex gap-2 text-xs">
+                                    <button onClick={() => setTreeBasis('story')} className={`px-3 py-1.5 rounded-lg ${treeBasis === 'story' ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-300 text-slate-600'}`}>{lang === 'en' ? 'Current Story' : 'הסיפור הנבחר'}</button>
+                                    <button onClick={() => setTreeBasis('global')} className={`px-3 py-1.5 rounded-lg ${treeBasis === 'global' ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-300 text-slate-600'}`}>{lang === 'en' ? 'Global Corpus' : 'הקורפוס המלא'}</button>
+                                    <button onClick={() => setTreeBasis('delta')} className={`px-3 py-1.5 rounded-lg ${treeBasis === 'delta' ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-300 text-slate-600'}`}>{lang === 'en' ? 'Delta' : 'פער'}</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="rounded-xl border border-slate-200 bg-white overflow-auto">
+                            <table className="text-xs border-collapse min-w-[760px] w-full">
+                                <thead className="sticky top-0 z-10 bg-slate-800 text-white">
+                                    <tr>
+                                        <th className="px-2 py-2 text-right border-l border-slate-600">{lang === 'en' ? 'Manuscript' : 'כתב יד'}</th>
+                                        {selectedMs.map(r => <th key={`mh-${r.key}`} className="px-2 py-2 text-right border-l border-slate-600 min-w-[120px]"><div className="text-[10px] leading-tight">{shortLib(r.library)}</div><div className="text-[9px] text-slate-300">{r.number}</div></th>)}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {selectedMs.map((rowMs, i) => (
+                                        <tr key={`mr-${rowMs.key}`} className="border-b border-slate-100">
+                                            <td className="px-2 py-2 text-right bg-slate-50 border-l border-slate-100"><div className="text-[10px] leading-tight text-slate-700">{shortLib(rowMs.library)}</div><div className="text-[9px] text-slate-400">{rowMs.number}</div></td>
+                                            {selectedMs.map((colMs, j) => {
+                                                const p = mapPairwise[i][j];
+                                                const tone = p.similarity > 0.82 ? 'bg-emerald-50 text-emerald-800' : p.similarity > 0.62 ? 'bg-amber-50 text-amber-800' : 'bg-rose-50 text-rose-800';
+                                                return <td key={`mc-${rowMs.key}-${colMs.key}`} className={`px-2 py-2 border-l border-slate-100 ${tone}`}><div className="font-semibold">{Math.round(p.similarity * 100)}%</div><div className="text-[9px] opacity-80">d={p.distance.toFixed(2)}</div></td>;
+                                            })}
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
 const App = () => {
     const [lang,      setLang    ] = useState('he');
     const [tab,       setTab     ] = useState('inventory');
@@ -3350,35 +4177,50 @@ const App = () => {
         setErrors([]);
 
         Promise.allSettled([
-            fetchGviz(MSS_ID,    'sheet=mss', cacheTag + '_mss'),                       // [0] MSS inventory (mss tab)
-            fetchGviz(IGERET_ID, 'gid=0', cacheTag + '_order'),                        // [1] story order
-            fetchGviz(IGERET_ID, 'sheet=' + enc('טקסט סיפורים'), cacheTag + '_texts'), // [2] story texts
+            fetchGviz(MSS_ID,    'sheet=mss', cacheTag + '_mss'),
+            fetchGviz(IGERET_ID, 'gid=0', cacheTag + '_order'),
+            ...SYNOPSIS_SHEETS.map(sheetId =>
+                fetchGviz(IGERET_ID, 'sheet=' + enc(sheetId), `${cacheTag}_synopsis_${sheetId}`),
+            ),
         ]).then(results => {
-            const [r0, r1, r2] = results;
+            const [r0, r1, ...synopsisResults] = results;
             const errs = [];
+            let parsedMss = { mssData: [], workNames: [], metaFields: [] };
+            let parsedOrder = [];
 
             if (r0.status === 'fulfilled') {
-                const { mssData: md, workNames: wn, metaFields: mf } = parseMss(r0.value);
-                setMssData(md);
-                setWorkNames(wn);
-                setMetaFields(mf || []);
+                parsedMss = parseMss(r0.value);
+                setMssData(parsedMss.mssData);
+                setWorkNames(parsedMss.workNames);
+                setMetaFields(parsedMss.metaFields || []);
             } else {
                 errs.push(`מצאי כ״י: ${r0.reason?.message || 'שגיאה'}`);
             }
 
             if (r1.status === 'fulfilled') {
-                setOrderData(parseIgeret1(r1.value));
+                parsedOrder = parseIgeret1(r1.value);
+                setOrderData(parsedOrder);
             } else {
                 errs.push(`סדר סיפורים: ${r1.reason?.message || 'שגיאה'}`);
             }
 
-            if (r2.status === 'fulfilled') {
-                const parsedTexts = parseIgeret2(r2.value);
+            const goodSheets = [];
+            synopsisResults.forEach((res, idx) => {
+                const sheetId = SYNOPSIS_SHEETS[idx];
+                if (res.status === 'fulfilled') {
+                    goodSheets.push({ sheetId, resp: res.value });
+                } else {
+                    errs.push(`סינופסיס ${sheetId}: ${res.reason?.message || 'שגיאה'}`);
+                }
+            });
+
+            if (goodSheets.length) {
+                const parsedTexts = parseSynopsisCollection(goodSheets, buildKnownManuscripts(parsedMss.mssData, parsedOrder));
                 setTextsData(parsedTexts.rows || []);
                 setTextsAudit(parsedTexts.audit || null);
             } else {
+                setTextsData([]);
                 setTextsAudit(null);
-                errs.push(`טקסטים: ${r2.reason?.message || 'שגיאה'}`);
             }
 
             setErrors(errs);
@@ -3508,7 +4350,7 @@ const App = () => {
 
                     {/* ── TEXTS TAB ── */}
                     {tab === 'texts' && (
-                        <TextsTab textsData={textsData} textsAudit={textsAudit} orderData={orderData} lang={lang} jumpStory={textsJumpStory} />
+                        <TextsTabV2 textsData={textsData} textsAudit={textsAudit} orderData={orderData} lang={lang} jumpStory={textsJumpStory} />
                     )}
 
                 </div>
