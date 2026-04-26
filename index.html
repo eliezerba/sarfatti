@@ -43,7 +43,7 @@ const { useState, useMemo, useEffect, useRef } = React;
 ═══════════════════════════════════════════════════════════ */
 const MSS_ID    = "1aD77sj5VrMVMx_fNw0lXY7ljbEUQjpASL-Hmz9mGlK8";
 const IGERET_ID = "1Qc09m0bK0EJiWnQUZe4k9TfiCPz-NISHqswfo_P4sAc";
-const SYNOPSIS_SHEETS = ['1', '2', '4', '5'];
+const SYNOPSIS_SHEETS = ['1','2','3','4','5','6','7','8','9','10','11','12','13','14','15','16'];
 
 /* ═══════════════════════════════════════════════════════════
    JSONP FETCH  — injects a <script> tag, so no CORS needed.
@@ -4210,7 +4210,8 @@ const App = () => {
                 if (res.status === 'fulfilled') {
                     goodSheets.push({ sheetId, resp: res.value });
                 } else {
-                    errs.push(`סינופסיס ${sheetId}: ${res.reason?.message || 'שגיאה'}`);
+                    // Sheet may not exist yet — silently skip
+                    console.debug(`synopsis sheet ${sheetId} not found:`, res.reason?.message);
                 }
             });
 
