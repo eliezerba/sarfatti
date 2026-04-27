@@ -1307,10 +1307,29 @@
     return best.aligned;
   }
 
+  // Full-text similarity for distance-matrix / tree computation.
+  // Combines word-level Jaccard, character 3-gram cosine, and length ratio so
+  // that near-spelling-identical words (e.g. plene/defective, קנה/קנא) receive
+  // partial credit instead of being treated as completely different tokens.
+  function fullTextSimilarity(a, b) {
+    var ta = tokenizeText(a);
+    var tb = tokenizeText(b);
+    if (!ta.length && !tb.length) return 1;
+    if (!ta.length || !tb.length) return 0;
+    var jac = jaccardTokens(ta, tb);
+    var cg = charGramSimilarity(a, b);
+    var lenRatio = Math.max(0, 1 - Math.abs(ta.length - tb.length) / Math.max(1, Math.max(ta.length, tb.length)));
+    // Weights: word Jaccard dominant (captures lexical identity),
+    // char n-gram adds partial credit for spelling variants,
+    // length ratio discourages pairing radically different-sized texts.
+    return jac * 0.65 + cg * 0.25 + lenRatio * 0.10;
+  }
+
   window.SarfattiAlignment = {
     normalizeToken: normalizeToken,
     tokenizeText: tokenizeText,
     textJaccard: textJaccard,
+    fullTextSimilarity: fullTextSimilarity,
     splitSynopsisText: splitSynopsisText,
     segmentSimilarity: segmentSimilarity,
     alignToBase: alignToBase,

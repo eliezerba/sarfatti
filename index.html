@@ -756,6 +756,15 @@ function textJaccard(a, b) {
     return union ? inter / union : 0;
 }
 
+// Richer full-text similarity for distance-matrix / tree computation.
+// Delegates to alignment-engine when available; otherwise falls back to textJaccard.
+function fullTextSimilarity(a, b) {
+    if (window.SarfattiAlignment?.fullTextSimilarity) {
+        return window.SarfattiAlignment.fullTextSimilarity(a, b);
+    }
+    return textJaccard(a, b);
+}
+
 function textDiffProfile(baseText, witnessText) {
     const a = tokenizeText(baseText);
     const b = tokenizeText(witnessText);
@@ -1764,9 +1773,22 @@ function detectCommunities(n, allPairs, opts = {}) {
 ═══════════════════════════════════════════════════════════ */
 function ProximityMap({ mssData, workNames, orderData, lang }) {
     const W = 980, H = 560;
-    const NODE_R = 4;
     const COMM_PALETTE = ['#0f766e', '#0369a1', '#b45309', '#7c3aed', '#be123c', '#475569'];
     const ISOLATED_COLOR = '#cbd5e1';
+    // Bubble size and color intensity both reflect inventory (number of works).
+    // More works → larger, more opaque circle; fewer works → smaller, more transparent.
+    const maxInventory = Math.max(1, ...mssData.map(ms => (ms.works || []).length));
+    const minInventory = Math.min(maxInventory, ...mssData.map(ms => (ms.works || []).length));
+    const nodeRadius = i => {
+        const wc = (mssData[i]?.works || []).length;
+        const frac = maxInventory > minInventory ? (wc - minInventory) / (maxInventory - minInventory) : 0.5;
+        return 2.0 + frac * 4.8;  // 2.0 (fewest works) → 6.8 (most works)
+    };
+    const nodeOpacity = i => {
+        const wc = (mssData[i]?.works || []).length;
+        const frac = maxInventory > minInventory ? (wc - minInventory) / (maxInventory - minInventory) : 0.5;
+        return 0.40 + frac * 0.60;  // 0.40 → 1.0
+    };
 
     const [renderMode, setRenderMode] = useState('links'); // links | works
     const [linkThreshold, setLinkThreshold] = useState(0);
@@ -2137,6 +2159,8 @@ function ProximityMap({ mssData, workNames, orderData, lang }) {
                         const isHover = hoveredIdx === i;
                         const isSelected = selectedIdx === i;
                         const color = nodeColor(i);
+                        const r = nodeRadius(i);
+                        const opac = nodeOpacity(i);
                         const label = `${shortLib(ms.library || '').trim() || ms.library}${ms.number ? ` · ${ms.number}` : ''}`;
                         return (
                             <g
@@ -2146,8 +2170,8 @@ function ProximityMap({ mssData, workNames, orderData, lang }) {
                                 onMouseLeave={() => setHoveredIdx(null)}
                                 onClick={() => setSelectedIdx(prev => prev === i ? null : i)}
                                 style={{ cursor: 'pointer' }}>
-                                <circle r={NODE_R + (isSelected ? 3.6 : isHover ? 2.2 : 0)} fill={color} opacity={isSelected ? 0.26 : 0.16} />
-                                <circle r={NODE_R} fill={color} stroke="white" strokeWidth="1" opacity="0.88" />
+                                <circle r={r + (isSelected ? 3.6 : isHover ? 2.2 : 0)} fill={color} opacity={isSelected ? 0.26 : 0.16} />
+                                <circle r={r} fill={color} stroke="white" strokeWidth="1" opacity={opac} />
                                 <text
                                     x={7}
                                     y={-6}
@@ -2179,7 +2203,10 @@ function ProximityMap({ mssData, workNames, orderData, lang }) {
                         }}>
                         <div className="font-semibold text-slate-800 leading-snug">{hoveredMs.library}</div>
                         {hoveredMs.number && <div className="text-slate-500 text-[10px] mt-0.5">{hoveredMs.number}</div>}
-                        <div className="text-slate-400 text-[10px] mt-1">
+                        <div className="text-slate-600 text-[10px] mt-1 font-medium">
+                            {lang === 'en' ? 'Works in inventory' : 'חיבורים במצאי'}: {(hoveredMs.works || []).length} / {maxInventory}
+                        </div>
+                        <div className="text-slate-400 text-[10px] mt-0.5">
                             {hoveredMs.year ? `${lang === 'en' ? 'Year' : 'שנה'}: ${hoveredMs.year}` : ''}
                             {hoveredMs.century ? ` · ${lang === 'en' ? 'Century' : 'מאה'}: ${hoveredMs.century}` : ''}
                             {hoveredMs.scriptType ? ` · ${lang === 'en' ? 'Script' : 'כתיבה'}: ${hoveredMs.scriptType}` : ''}
@@ -2241,8 +2268,8 @@ function ProximityMap({ mssData, workNames, orderData, lang }) {
 
             <div className="px-3 py-2 border-t border-slate-200 bg-slate-50 text-[11px] text-slate-500 leading-relaxed">
                 {lang === 'en'
-                    ? 'Names are always visible (library + shelfmark). Mouse wheel zooms in/out; drag to pan. Set threshold to 0 to hide lines, then increase to reveal stronger links.'
-                    : 'שמות כתבי היד מוצגים תמיד (ספרייה + מספר מדף). גלילת עכבר מבצעת זום וגרירה מזיזה את המפה. כאשר הסף 0 הקווים מוסתרים, וככל שמעלים את הסף מוצגים קשרים חזקים יותר.'}
+                    ? `Names are always visible (library + shelfmark). Mouse wheel zooms in/out; drag to pan. Set threshold to 0 to hide lines. Bubble size and intensity = inventory depth (${minInventory}–${maxInventory} works).`
+                    : `שמות כתבי היד מוצגים תמיד. גלילת עכבר מבצעת זום וגרירה מזיזה את המפה. גודל העיגול ועוצמת הצבע = מספר חיבורים במצאי (${minInventory}–${maxInventory}).`}
             </div>
         </div>
     );
@@ -2955,11 +2982,26 @@ function TextsTab({ textsData, textsAudit, orderData, lang, jumpStory }) {
         for (let i = 0; i < selectedMs.length; i++) {
             for (let j = i + 1; j < selectedMs.length; j++) {
                 const ki = keyAt(i), kj = keyAt(j);
-                const pairKey = `${ki}||${kj}`;
-                const storyA = selectedStory == null ? '' : (textsByMs[ki]?.[selectedStory] || '');
-                const storyB = selectedStory == null ? '' : (textsByMs[kj]?.[selectedStory] || '');
-                dStory[pairKey] = 1 - textJaccard(storyA, storyB);
-                dGlobal[pairKey] = 1 - textJaccard(globalCorpus[ki], globalCorpus[kj]);
+                // Use string-sorted key to match the ordering used by all getDist lookups.
+                const pairKey = ki < kj ? `${ki}||${kj}` : `${kj}||${ki}`;
+                let storyDist;
+                if (selectedStory == null) {
+                    // No specific story selected – average distance across all stories.
+                    let s = 0, c = 0;
+                    storyNums.forEach(n => {
+                        const a = textsByMs[ki]?.[n] || '';
+                        const b = textsByMs[kj]?.[n] || '';
+                        if (a || b) { s += 1 - fullTextSimilarity(a, b); c++; }
+                    });
+                    storyDist = c ? s / c : 1;
+                } else {
+                    storyDist = 1 - fullTextSimilarity(
+                        textsByMs[ki]?.[selectedStory] || '',
+                        textsByMs[kj]?.[selectedStory] || ''
+                    );
+                }
+                dStory[pairKey] = storyDist;
+                dGlobal[pairKey] = 1 - fullTextSimilarity(globalCorpus[ki], globalCorpus[kj]);
             }
         }
         return { dStory, dGlobal };
@@ -3808,11 +3850,26 @@ function TextsTabV2({ textsData, textsAudit, orderData, lang, jumpStory }) {
         for (let i = 0; i < selectedMs.length; i++) {
             for (let j = i + 1; j < selectedMs.length; j++) {
                 const ki = keyAt(i), kj = keyAt(j);
-                const pairKey = `${ki}||${kj}`;
-                const storyA = selectedStory == null ? '' : (textsByMs[ki]?.[selectedStory]?.fullText || '');
-                const storyB = selectedStory == null ? '' : (textsByMs[kj]?.[selectedStory]?.fullText || '');
-                dStory[pairKey] = 1 - textJaccard(storyA, storyB);
-                dGlobal[pairKey] = 1 - textJaccard(globalCorpus[ki], globalCorpus[kj]);
+                // Use string-sorted key to match the ordering used by all getDist lookups.
+                const pairKey = ki < kj ? `${ki}||${kj}` : `${kj}||${ki}`;
+                let storyDist;
+                if (selectedStory == null) {
+                    // No specific story selected – average distance across all stories.
+                    let s = 0, c = 0;
+                    storyNums.forEach(n => {
+                        const a = textsByMs[ki]?.[n]?.fullText || '';
+                        const b = textsByMs[kj]?.[n]?.fullText || '';
+                        if (a || b) { s += 1 - fullTextSimilarity(a, b); c++; }
+                    });
+                    storyDist = c ? s / c : 1;
+                } else {
+                    storyDist = 1 - fullTextSimilarity(
+                        textsByMs[ki]?.[selectedStory]?.fullText || '',
+                        textsByMs[kj]?.[selectedStory]?.fullText || ''
+                    );
+                }
+                dStory[pairKey] = storyDist;
+                dGlobal[pairKey] = 1 - fullTextSimilarity(globalCorpus[ki], globalCorpus[kj]);
             }
         }
         return { dStory, dGlobal };
