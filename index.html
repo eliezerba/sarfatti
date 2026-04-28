@@ -43,7 +43,7 @@ const { useState, useMemo, useEffect, useRef } = React;
 ═══════════════════════════════════════════════════════════ */
 const MSS_ID    = "1aD77sj5VrMVMx_fNw0lXY7ljbEUQjpASL-Hmz9mGlK8";
 const IGERET_ID = "1Qc09m0bK0EJiWnQUZe4k9TfiCPz-NISHqswfo_P4sAc";
-const SYNOPSIS_SHEETS = ['1','2','3','4','5','6','7','8','9','10','11','12','13','14','15','16'];
+const SYNOPSIS_SHEETS = ['1','2','3','4','5','6','7','8','9','10','11','12','13','14','15','16','17'];
 
 /* ═══════════════════════════════════════════════════════════
    JSONP FETCH  — injects a <script> tag, so no CORS needed.
@@ -496,7 +496,28 @@ function buildKnownManuscripts(mssData = [], orderData = []) {
 
 function parseSynopsisMsHeader(label, knownManuscripts = []) {
     const headerLabel = cleanLabel(label || '');
-    const headerNorm = normalizeMsPart(headerLabel);
+    // The KEY is always derived from the raw header text (not the inventory
+    // match).  This ensures that two differently-labelled columns can NEVER
+    // share a key and accidentally deduplicate one another, even when both
+    // headers happen to resolve to the same canonical inventory entry.
+    // The inventory match is used ONLY to enrich the display names (library,
+    // number) that appear in the UI.
+    const headerKey = normalizeMsPart(headerLabel) || headerLabel;
+
+    // Normalize the header for inventory-matching purposes (aliases so that
+    // German/abbreviated names can still be recognised).
+    const headerNorm = (() => {
+        let n = normalizeMsPart(headerLabel);
+        // German city/institution variants → English equivalents
+        n = n.replace(/\bmuenchen\b/g, 'munich');
+        n = n.replace(/\bbayerische\s+staatsbibliothek\b/g, 'bavarian state library');
+        n = n.replace(/\bkoeln\b/g, 'cologne');
+        // Common abbreviations
+        n = n.replace(/\brsl\b/g, 'russian state library');
+        // Plural/singular institution-name variants
+        n = n.replace(/\bbodleian\s+libraries\b/g, 'bodleian library');
+        return n;
+    })();
     let best = null;
 
     knownManuscripts.forEach(ms => {
@@ -505,12 +526,37 @@ function parseSynopsisMsHeader(label, knownManuscripts = []) {
         const comboNorm = normalizeMsPart(`${ms.library} ${ms.number}`);
         let score = 0;
 
-        if (headerNorm && comboNorm && (headerNorm === comboNorm || headerNorm.includes(comboNorm) || comboNorm.includes(headerNorm))) {
+        if (headerNorm && comboNorm && headerNorm === comboNorm) {
+            // Exact match — always the strongest signal.
+            score = 2000;
+        } else if (headerNorm && comboNorm && headerNorm.includes(comboNorm)) {
+            // Header is a superset of the combo (header has extra words) — good match.
             score = comboNorm.length + 1000;
+        } else if (headerNorm && comboNorm && comboNorm.includes(headerNorm)) {
+            // Combo is a superset of the header (inventory entry has extra suffix like
+            // "TS", "II", etc. that the header omits).  This is a weaker match and must
+            // score BELOW an exact match so that the precise entry wins.
+            score = headerNorm.length + 500;
         } else if (headerNorm && libNorm && numNorm && headerNorm.includes(libNorm) && headerNorm.includes(numNorm)) {
             score = libNorm.length + numNorm.length;
         } else if (headerNorm && libNorm && headerNorm.includes(libNorm)) {
-            score = libNorm.length;
+            // Only score this library-name match when the candidate's MS number
+            // does NOT contradict what is in the header.  If the known MS has a
+            // specific number (e.g. "Cod. Parm. 2430") that is absent from the
+            // header, this is a false match and must be skipped — otherwise two
+            // different column headers (e.g. Cod. Parm. 2419 and Cod. Parm.
+            // 2486) would both be assigned the same wrong key, causing one of
+            // them to be silently deduplicated out of the manuscript list.
+            if (!numNorm || headerNorm.includes(numNorm)) {
+                score = libNorm.length;
+            }
+        } else if (headerNorm && numNorm && headerNorm.includes(numNorm)) {
+            // Number-only match: the library name appears in a different format
+            // (e.g. "BL" vs "London, The British Library", or "RSL" vs
+            // "Russian State Library") but the MS number uniquely identifies
+            // the candidate.  Use a modest score so a full lib+num match still
+            // wins if one exists.
+            score = numNorm.length;
         }
 
         if (!best || score > best.score) {
@@ -523,14 +569,14 @@ function parseSynopsisMsHeader(label, knownManuscripts = []) {
             headerLabel,
             library: best.library,
             number: best.number,
-            key: msKey(best.library, best.number),
+            key: headerKey,  // always header-derived — prevents key collisions
         };
     }
 
     const fallback = headerLabel.match(/^(.*?)(?:\s*,\s*|\s+)((?:Ms|Cod)\.?\s+.+)$/i);
     const library = fallback ? fallback[1].trim() : headerLabel;
     const number = fallback ? fallback[2].trim() : '';
-    return { headerLabel, library, number, key: msKey(library, number || headerLabel) };
+    return { headerLabel, library, number, key: headerKey };
 }
 
 function parseSynopsisCollection(entries, knownManuscripts = []) {
@@ -582,11 +628,23 @@ function parseSynopsisCollection(entries, knownManuscripts = []) {
             }
 
             const footnoteCells = cellTexts.filter(item => /^\[\d+\]/.test(String(item.text || '').trim()));
-            if (storyNum == null && sectionNum == null && footnoteCells.length) {
+            // A footnote-definition row is detected when:
+            //   (a) the classic case: both storyNum and sectionNum are null, OR
+            //   (b) every non-empty cell in the row starts with [N] notation
+            //       (handles sheets where the story number is present in footnote rows)
+            const isFootnoteRow = footnoteCells.length > 0 &&
+                ((storyNum == null && sectionNum == null) || footnoteCells.length === cellTexts.length);
+            if (isFootnoteRow) {
                 footnoteCells.forEach(({ ms, text }) => {
-                    const m = String(text || '').trim().match(/^\[(\d+)\]\s*(.*)$/);
-                    if (!m) return;
-                    noteMaps[ms.key][m[1]] = m[2].trim();
+                    // Parse all [N] entries in the cell; supports multi-line and multiple
+                    // footnotes per cell, e.g. "[1] text1\n[2] text2"
+                    const clean = String(text || '').replace(/\r/g, '').trim();
+                    const parts = clean.split(/\n(?=\[\d+\])/);
+                    parts.forEach(part => {
+                        const m = part.trim().match(/^\[(\d+)\]\s*([\s\S]*)$/);
+                        if (!m) return;
+                        noteMaps[ms.key][m[1]] = m[2].trim();
+                    });
                 });
                 audit.droppedRows++;
                 audit.droppedReasons.footnoteRow++;
@@ -601,6 +659,7 @@ function parseSynopsisCollection(entries, knownManuscripts = []) {
 
             cellTexts.forEach(({ ms, text }) => {
                 storyRows.push({
+                    key: ms.key,
                     library: ms.library,
                     number: ms.number,
                     storyNum,
@@ -2761,7 +2820,7 @@ function TextsTab({ textsData, textsAudit, orderData, lang, jumpStory }) {
         const seen = new Set();
         const out = [];
         textsData.forEach(t => {
-            const key = msKey(t.library, t.number);
+            const key = t.key || msKey(t.library, t.number);
             if (seen.has(key)) return;
             seen.add(key);
             out.push({ key, library: t.library, number: t.number });
@@ -2815,7 +2874,7 @@ function TextsTab({ textsData, textsAudit, orderData, lang, jumpStory }) {
         textsData.forEach(t => {
             if (t.storyNum !== target) return;
             if (!String(t.text || '').trim()) return;
-            const key = msKey(t.library, t.number);
+            const key = t.key || msKey(t.library, t.number);
             if (seen.has(key)) return;
             seen.add(key);
             keys.push(key);
@@ -2826,7 +2885,7 @@ function TextsTab({ textsData, textsAudit, orderData, lang, jumpStory }) {
     const textsByMs = useMemo(() => {
         const out = {};
         textsData.forEach(t => {
-            const key = msKey(t.library, t.number);
+            const key = t.key || msKey(t.library, t.number);
             if (!out[key]) out[key] = {};
             out[key][t.storyNum] = t.text;
         });
@@ -3649,7 +3708,7 @@ function TextsTabV2({ textsData, textsAudit, orderData, lang, jumpStory }) {
         const seen = new Set();
         const out = [];
         textsData.forEach(t => {
-            const key = msKey(t.library, t.number);
+            const key = t.key || msKey(t.library, t.number);
             if (seen.has(key)) return;
             seen.add(key);
             out.push({ key, library: t.library, number: t.number });
@@ -3701,7 +3760,7 @@ function TextsTabV2({ textsData, textsAudit, orderData, lang, jumpStory }) {
         textsData.forEach(t => {
             if (t.storyNum !== target) return;
             if (!String(t.text || '').trim()) return;
-            const key = msKey(t.library, t.number);
+            const key = t.key || msKey(t.library, t.number);
             if (seen.has(key)) return;
             seen.add(key);
             keys.push(key);
@@ -3712,7 +3771,7 @@ function TextsTabV2({ textsData, textsAudit, orderData, lang, jumpStory }) {
     const textsByMs = useMemo(() => {
         const out = {};
         textsData.forEach(t => {
-            const key = msKey(t.library, t.number);
+            const key = t.key || msKey(t.library, t.number);
             if (!out[key]) out[key] = {};
             if (!out[key][t.storyNum]) out[key][t.storyNum] = { sections: {}, notes: {} };
             out[key][t.storyNum].sections[t.sectionNum] = { text: t.text || '' };
