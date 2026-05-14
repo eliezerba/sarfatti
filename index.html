@@ -382,16 +382,15 @@ function parseMss(resp) {
 /* ═══════════════════════════════════════════════════════════
    PARSER 2 (v2): רשימת סיפורים-1 — story order (columnar format)
 
-   gviz column labels (row 1 of the sheet):
-     Col A (0): מספר סיפור   (story ID: S-1, S-2, …)
-     Col B (1): שם סיפור     (story name)
-     Col C (2): הערה על הסיפור (note)
-     Col D (3): כתב יד        (label: "גירסה" in the version row)
-     Col E (4): מספר אצל צרפתי (canonical Sarfatti number)
-     Col F+ (5+): one column per manuscript — cell = order in that MS
-
-   rows[0] is the version row (col D = "גירסה", ms cols = version number).
-   rows[1+] are story data rows.
+   Spreadsheet layout (gviz mapping):
+     Row 1  → gviz col labels (general headers, not used for MS names)
+     Row 2  → gviz rows[0]: Col F-L = MS names
+     Row 3  → gviz rows[1]: Col F-L = version of the MS
+     Rows 4+ → gviz rows[2+]: story data
+       Col B (1): שם הסיפור  (story name)
+       Col C (2): הערה        (note about the story)
+       Col E (4): מספר אצל צרפתי (Sarfatti number, may carry ′ or .)
+       Col F-L (5+): מיקום הסיפור בכתב היד (story position in that MS)
 
    nameToMss — map from NAME (col D of Sarfati-Mss) to { library, number }
    so that orderData carries the canonical library/shelfmark identifiers.
@@ -402,52 +401,55 @@ function parseStoryListV2(resp, nameToMss = {}) {
     const rows = resp.table.rows || [];
     const MS_START = 5;  // ms columns start at index 5 (col F)
 
-    // Build ms-column metadata
+    // Need at least the two header rows (MS names + versions)
+    if (rows.length < 2) return [];
+
+    // rows[0] = spreadsheet row 2: MS names in cols F-L
+    const msNamesRow  = rows[0];
+    // rows[1] = spreadsheet row 3: versions in cols F-L
+    const versionsRow = rows[1];
+
+    // Helper: strip Sarfatti-style apostrophe/period markers and parse as float
+    const parseNum = raw => {
+        if (!raw) return null;
+        const n = parseFloat(String(raw).replace(/[^\d.]/g, ''));
+        return isNaN(n) || n <= 0 ? null : n;
+    };
+
+    // Build ms-column metadata from the MS-names row
+    const numCols = Math.max(cols.length, msNamesRow?.c?.length || 0);
     const msCols = [];
-    for (let i = MS_START; i < cols.length; i++) {
-        const rawLabel = cleanLabel(cols[i]?.label || '');
-        if (!rawLabel) continue;
-        // Strip "מספר בכתב היד " / "מספר בכ"י " prefix if present
-        const msName = rawLabel.replace(/^מספר\s+ב?כתב\s+ה?יד\s+/u, '').trim();
+    for (let i = MS_START; i < numCols; i++) {
+        const msName = cellStr(msNamesRow, i).trim();
         if (!msName) continue;
-        const mapped = nameToMss[msName];
+        const mapped  = nameToMss[msName];
+        const version = cellStr(versionsRow, i).trim() || '1';
         msCols.push({
             origIdx: i,
             msName,
             library: mapped?.library || msName,
             number:  mapped?.number  || '',
-            version: '1',
+            version,
         });
     }
     if (!msCols.length) return [];
 
-    // rows[0] is expected to be the version row
-    // (col D contains "גירסה", ms cols contain the version numbers)
-    let dataStartIdx = 0;
-    if (rows.length > 0) {
-        const firstRow = rows[0];
-        const col3Val = cellStr(firstRow, 3);
-        if (/גירסה/u.test(col3Val)) {
-            msCols.forEach(col => {
-                const v = cellStr(firstRow, col.origIdx);
-                if (v && /^\d+$/.test(v.trim())) col.version = v.trim();
-            });
-            dataStartIdx = 1;
-        }
-    }
-
     const out = [];
-    for (let ri = dataStartIdx; ri < rows.length; ri++) {
+    // Story data starts at rows[2] (spreadsheet row 4)
+    for (let ri = 2; ri < rows.length; ri++) {
         const r = rows[ri];
-        const storyId  = cellStr(r, 0);       // e.g. "S-1"
-        if (!storyId) continue;
-        const storyName    = cellStr(r, 1);
-        const sarfattiNum  = cellNum(r, 4);   // canonical Sarfatti number
+        const sarfattiRaw = cellStr(r, 4);     // Col E — Sarfatti number
+        if (!sarfattiRaw) continue;
+        const sarfattiNum = parseNum(sarfattiRaw);
+        if (sarfattiNum == null) continue;
+
+        const storyName = cellStr(r, 1);        // Col B
+        const note      = cellStr(r, 2);        // Col C
 
         msCols.forEach(col => {
             const raw = cellStr(r, col.origIdx);
-            if (!raw || raw === '-') return;   // absent in this MS
-            const msOrder = cellNum(r, col.origIdx);
+            if (!raw || raw === '-') return;    // absent in this MS
+            const msOrder = parseNum(raw);
             if (msOrder == null) return;
             // For version > 1, mark it in the shelfmark for unique display
             const versionSuffix = col.version !== '1' ? ` (${col.version})` : '';
@@ -457,9 +459,10 @@ function parseStoryListV2(resp, nameToMss = {}) {
                 msName:      col.msName,
                 version:     col.version,
                 sarfattiNum,
-                storyId,
+                storyId:     `S-${sarfattiNum}`,
                 msOrder,
                 storyName,
+                note,
             });
         });
     }
