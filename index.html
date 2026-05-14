@@ -399,31 +399,48 @@ function parseStoryListV2(resp, nameToMss = {}) {
     if (!resp?.table?.rows) return { orderData: [], allStories: [] };
     const cols = resp.table.cols || [];
     const rows = resp.table.rows || [];
-    const MS_START = 5;  // ms columns start at index 5 (col F)
+    const MS_START = 5;  // MS data columns start at col F (index 5)
 
-    // Need at least the two header rows (MS names + versions)
-    if (rows.length < 2) return { orderData: [], allStories: [] };
+    /*
+     * Actual spreadsheet layout (confirmed from gviz):
+     *
+     *   cols[0].label = 'מספר סיפור'       — story ID (S-1, S-2 …)
+     *   cols[1].label = 'שם סיפור'          — story name
+     *   cols[2].label = 'הערה על הסיפור'   — note
+     *   cols[3].label = 'כתב יד'            — separator/label column (unused in data)
+     *   cols[4].label = 'מספר אצל צרפתי'   — Sarfatti canonical number (numeric)
+     *   cols[5+].label = MS name            — e.g. "The Palatina Library Parma Italy Cod. Parm. 2419"
+     *     NOTE: col 5 has prefix "מספר בכתב היד " in its label; must be stripped.
+     *
+     *   rows[0]  = version/edition row:
+     *              col 3 (D) = "גירסה"  |  cols 5+ = version numbers (1, 2, …)
+     *   rows[1+] = story data rows
+     *              col 1 (B) = story name  |  col 2 (C) = note
+     *              col 4 (E) = Sarfatti canonical number  |  cols 5+ = order in each MS
+     */
 
-    // rows[0] = spreadsheet row 2: MS names in cols F-L
-    const msNamesRow  = rows[0];
-    // rows[1] = spreadsheet row 3: versions in cols F-L
-    const versionsRow = rows[1];
+    if (rows.length < 1) return { orderData: [], allStories: [] };
 
-    // Helper: strip Sarfatti-style apostrophe/period markers and parse as float
+    // Detect the version row: rows[0] col E (idx 4) is null / non-numeric
+    const firstSarfatti = cellStr(rows[0], 4);
+    const hasVersionRow = !firstSarfatti || isNaN(parseFloat(String(firstSarfatti).replace(/[^\d.]/g, '')));
+    const versionRow = hasVersionRow ? rows[0] : null;
+    const DATA_START = hasVersionRow ? 1 : 0;
+
     const parseNum = raw => {
         if (!raw) return null;
         const n = parseFloat(String(raw).replace(/[^\d.]/g, ''));
         return isNaN(n) || n <= 0 ? null : n;
     };
 
-    // Build ms-column metadata from the MS-names row
-    const numCols = Math.max(cols.length, msNamesRow?.c?.length || 0);
+    // Build MS-column metadata from gviz col labels (the real MS names live here)
     const msCols = [];
-    for (let i = MS_START; i < numCols; i++) {
-        const msName = cellStr(msNamesRow, i).trim();
+    for (let i = MS_START; i < cols.length; i++) {
+        // Strip "מספר בכתב היד " prefix that appears on some column labels
+        let msName = cleanLabel(cols[i]?.label || '').replace(/^מספר\s+בכתב\s+היד\s+/i, '').trim();
         if (!msName) continue;
         const mapped  = nameToMss[msName];
-        const version = cellStr(versionsRow, i).trim() || '1';
+        const version = versionRow ? (cellStr(versionRow, i).trim() || '1') : '1';
         msCols.push({
             origIdx: i,
             msName,
@@ -436,26 +453,29 @@ function parseStoryListV2(resp, nameToMss = {}) {
 
     const out = [];
     const allStories = [];
-    // Story data starts at rows[2] (spreadsheet row 4)
-    for (let ri = 2; ri < rows.length; ri++) {
+    const storySeen = new Set();   // deduplicate allStories by sarfattiNum
+
+    for (let ri = DATA_START; ri < rows.length; ri++) {
         const r = rows[ri];
-        const sarfattiRaw = cellStr(r, 4);     // Col E — Sarfatti number
+        const sarfattiRaw = cellStr(r, 4);     // Col E — Sarfatti canonical number
         if (!sarfattiRaw) continue;
         const sarfattiNum = parseNum(sarfattiRaw);
         if (sarfattiNum == null) continue;
 
-        const storyName = cellStr(r, 1);        // Col B
-        const note      = cellStr(r, 2);        // Col C
+        const storyName = cellStr(r, 1);       // Col B — story name
+        const note      = cellStr(r, 2);       // Col C — note
 
-        // Always record the canonical story entry (even if absent from all MSS)
-        allStories.push({ sarfattiNum, storyName, note });
+        // Record canonical story once per sarfattiNum
+        if (!storySeen.has(sarfattiNum)) {
+            storySeen.add(sarfattiNum);
+            allStories.push({ sarfattiNum, storyName, note });
+        }
 
         msCols.forEach(col => {
             const raw = cellStr(r, col.origIdx);
-            if (!raw || raw === '-') return;    // absent in this MS
+            if (!raw || raw === '-') return;   // absent in this MS
             const msOrder = parseNum(raw);
             if (msOrder == null) return;
-            // For version > 1, mark it in the shelfmark for unique display
             const versionSuffix = col.version !== '1' ? ` (${col.version})` : '';
             out.push({
                 library:     col.library,
