@@ -647,13 +647,38 @@ function parseSynopsisCollection(entries, knownManuscripts = []) {
     entries.forEach(({ sheetId, resp }) => {
         const cols = resp?.table?.cols || [];
         const rows = resp?.table?.rows || [];
+
+        /*
+         * Layout detection:
+         *   NEW (matching רשימת סיפורים-1):
+         *     Row 1  → gviz col labels  — general / empty headers
+         *     Row 2  → gviz rows[0]     — MS names  (cols 2+)
+         *     Row 3  → gviz rows[1]     — מהדורה / edition per MS
+         *     Row 4+ → gviz rows[2+]   — actual text data
+         *   OLD (col labels carry MS names, all rows are data):
+         *     gviz col labels           — MS names (cols 2+)
+         *     gviz rows[0+]             — text data
+         *
+         *   Heuristic: if col labels for MS columns (idx ≥ 2) are all
+         *   empty/blank → new layout; otherwise → old layout.
+         */
+        const hasColLabels = cols.slice(2).some(c => cleanLabel(c?.label || '').trim().length > 0);
+        const newLayout = !hasColLabels && rows.length >= 2;
+        const msNamesRow  = newLayout ? rows[0] : null;
+        const editionRow  = newLayout ? rows[1] : null;
+        const DATA_START  = newLayout ? 2 : 0;
+
         const manuscripts = cols
             .map((c, idx) => {
                 if (idx < 2) return null;
-                const label = cleanLabel(c?.label || '');
-                const hasAnyValue = rows.some(r => String(cellStr(r, idx) || '').trim());
+                // MS name: prefer rows[0] cell (new layout), fall back to col label
+                const nameFromRow   = msNamesRow ? cellStr(msNamesRow, idx).trim() : '';
+                const nameFromLabel = cleanLabel(c?.label || '');
+                const label = nameFromRow || nameFromLabel;
+                const edition = editionRow ? cellStr(editionRow, idx).trim() : '';
+                const hasAnyValue = rows.slice(DATA_START).some(r => String(cellStr(r, idx) || '').trim());
                 if (!label && !hasAnyValue) return null;
-                return { ...parseSynopsisMsHeader(label, knownManuscripts), colIdx: idx };
+                return { ...parseSynopsisMsHeader(label, knownManuscripts), colIdx: idx, edition };
             })
             .filter(Boolean);
 
@@ -672,7 +697,7 @@ function parseSynopsisCollection(entries, knownManuscripts = []) {
 
         manuscripts.forEach(ms => { noteMaps[ms.key] = {}; });
 
-        rows.forEach((r, idx) => {
+        rows.slice(DATA_START).forEach((r, idx) => {
             const storyNum = cellNum(r, 0);
             const sectionNum = cellNum(r, 1);
             const cellTexts = manuscripts
@@ -686,16 +711,10 @@ function parseSynopsisCollection(entries, knownManuscripts = []) {
             }
 
             const footnoteCells = cellTexts.filter(item => /^\[\d+\]/.test(String(item.text || '').trim()));
-            // A footnote-definition row is detected when:
-            //   (a) the classic case: both storyNum and sectionNum are null, OR
-            //   (b) every non-empty cell in the row starts with [N] notation
-            //       (handles sheets where the story number is present in footnote rows)
             const isFootnoteRow = footnoteCells.length > 0 &&
                 ((storyNum == null && sectionNum == null) || footnoteCells.length === cellTexts.length);
             if (isFootnoteRow) {
                 footnoteCells.forEach(({ ms, text }) => {
-                    // Parse all [N] entries in the cell; supports multi-line and multiple
-                    // footnotes per cell, e.g. "[1] text1\n[2] text2"
                     const clean = String(text || '').replace(/\r/g, '').trim();
                     const parts = clean.split(/\n(?=\[\d+\])/);
                     parts.forEach(part => {
@@ -720,12 +739,13 @@ function parseSynopsisCollection(entries, knownManuscripts = []) {
                     key: ms.key,
                     library: ms.library,
                     number: ms.number,
+                    edition: ms.edition || '',
                     storyNum,
                     sectionNum,
                     text,
                     notes: noteMaps[ms.key],
                     _sourceSheet: String(sheetId),
-                    _sourceRow: idx + 1,
+                    _sourceRow: DATA_START + idx + 1,
                 });
                 audit.keptRows++;
             });
@@ -2772,93 +2792,6 @@ function StoryOrderTab({ orderData, allStories = [], lang, onOpenTextStory, stor
                     </table>
                 </div>
 
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                    <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-                        <div className="border-b border-slate-100 bg-white overflow-x-auto">
-                            <div className="grid grid-cols-4 gap-2 p-2 min-w-[980px] text-[11px]">
-                                <div className="rounded-lg border border-slate-200 px-2.5 py-2 bg-slate-50">
-                                    <div className="text-slate-500 mb-1">{lang === 'en' ? 'Weight: story order' : 'משקל: סדר סיפורים'}</div>
-                                    <div className="flex items-center gap-2">
-                                        <input type="range" min="0" max="1" step="0.05" value={weightOrder} onChange={e => setWeightOrder(Number(e.target.value))} className="w-full" />
-                                        <span className="font-mono text-slate-700">{weightOrder.toFixed(2)}</span>
-                                    </div>
-                                </div>
-                                <div className="rounded-lg border border-slate-200 px-2.5 py-2 bg-slate-50">
-                                    <div className="text-slate-500 mb-1">{lang === 'en' ? 'Weight: coverage of Sarfatti stories' : 'משקל: כיסוי סיפורי צרפתי'}</div>
-                                    <div className="flex items-center gap-2">
-                                        <input type="range" min="0" max="1" step="0.05" value={weightCoverage} onChange={e => setWeightCoverage(Number(e.target.value))} className="w-full" />
-                                        <span className="font-mono text-slate-700">{weightCoverage.toFixed(2)}</span>
-                                    </div>
-                                </div>
-                                <div className="rounded-lg border border-slate-200 px-2.5 py-2 bg-slate-50">
-                                    <div className="text-slate-500 mb-1">{lang === 'en' ? 'Weight: additional/non-canonical stories' : 'משקל: סיפורים נוספים/לא-קנוניים'}</div>
-                                    <div className="flex items-center gap-2">
-                                        <input type="range" min="0" max="1" step="0.05" value={weightAdditions} onChange={e => setWeightAdditions(Number(e.target.value))} className="w-full" />
-                                        <span className="font-mono text-slate-700">{weightAdditions.toFixed(2)}</span>
-                                    </div>
-                                </div>
-                                <div className="rounded-lg border border-slate-200 px-2.5 py-2 bg-slate-50">
-                                    <div className="text-slate-500 mb-1">{lang === 'en' ? 'Additions penalty strength' : 'עוצמת קנס על תוספות'}</div>
-                                    <div className="flex items-center gap-2">
-                                        <input type="range" min="0" max="2" step="0.1" value={additionsPenaltyStrength} onChange={e => setAdditionsPenaltyStrength(Number(e.target.value))} className="w-full" />
-                                        <span className="font-mono text-slate-700">{additionsPenaltyStrength.toFixed(1)}</span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <div className="px-3 py-2 border-b border-slate-100 bg-slate-50 text-[11px] text-slate-600">
-                            {lang === 'en' ? 'Manuscript similarity to Sarfatti baseline' : 'דמיון כתבי יד לבסיס צרפתי'}
-                        </div>
-                        <div className="max-h-[250px] overflow-auto">
-                            <table className="w-full text-[11px] border-collapse">
-                                <thead className="bg-slate-100 text-slate-600">
-                                    <tr>
-                                        <th className="px-2 py-1.5 text-right">{lang === 'en' ? 'Manuscript' : 'כתב יד'}</th>
-                                        <th className="px-2 py-1.5 text-center">{lang === 'en' ? 'Weighted' : 'משוקלל'}</th>
-                                        <th className="px-2 py-1.5 text-center">{lang === 'en' ? 'Order' : 'סדר'}</th>
-                                        <th className="px-2 py-1.5 text-center">{lang === 'en' ? 'Coverage' : 'כיסוי'}</th>
-                                        <th className="px-2 py-1.5 text-center">+add</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {msMetrics.map(ms => (
-                                        <tr key={`metric-${ms.key}`} className="border-b border-slate-100">
-                                            <td className="px-2 py-1.5 text-right text-slate-700">{shortLib(ms.library)} ({ms.number})</td>
-                                            <td className="px-2 py-1.5 text-center font-semibold text-slate-800">{Math.round(ms.weighted * 100)}%</td>
-                                            <td className="px-2 py-1.5 text-center text-slate-600">{Math.round(ms.orderSim * 100)}%</td>
-                                            <td className="px-2 py-1.5 text-center text-slate-600">{Math.round(ms.coverage * 100)}%</td>
-                                            <td className="px-2 py-1.5 text-center text-slate-600">{ms.additions}</td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-
-                    <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-                        <div className="px-3 py-2 border-b border-slate-100 bg-slate-50 text-[11px] text-slate-600">
-                            {lang === 'en' ? 'Additional / non-canonical stories by manuscript' : 'סיפורים נוספים/לא-קנוניים לפי כתב יד'}
-                        </div>
-                        <div className="max-h-[250px] overflow-auto">
-                            <table className="w-full text-[11px] border-collapse">
-                                <thead className="bg-slate-100 text-slate-600">
-                                    <tr>
-                                        <th className="px-2 py-1.5 text-right">{lang === 'en' ? 'Manuscript' : 'כתב יד'}</th>
-                                        <th className="px-2 py-1.5 text-center">{lang === 'en' ? 'Additions count' : 'כמות תוספות'}</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {additionsSummary.map(ms => (
-                                        <tr key={`addsum-${ms.key}`} className="border-b border-slate-100">
-                                            <td className="px-2 py-1.5 text-right text-slate-700">{shortLib(ms.library)} ({ms.number})</td>
-                                            <td className="px-2 py-1.5 text-center text-slate-600">{ms.additions}</td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
             </div>
         </div>
     );
@@ -3790,7 +3723,7 @@ function TextsTabV2({ textsData, textsAudit, orderData, lang, jumpStory }) {
             const key = t.key || msKey(t.library, t.number);
             if (seen.has(key)) return;
             seen.add(key);
-            out.push({ key, library: t.library, number: t.number });
+            out.push({ key, library: t.library, number: t.number, edition: t.edition || '' });
         });
         return out;
     }, [textsData]);
@@ -4160,7 +4093,11 @@ function TextsTabV2({ textsData, textsAudit, orderData, lang, jumpStory }) {
                         return (
                             <label key={ms.key} className={`flex items-start gap-2 rounded px-2 py-1.5 cursor-pointer ${checked ? 'bg-indigo-50' : 'hover:bg-white'}`}>
                                 <input type="checkbox" checked={checked} onChange={() => toggleMs(ms.key)} className="mt-0.5" />
-                                <span className="text-xs leading-snug"><span className="block text-slate-700">{shortLib(ms.library)}</span><span className="block text-[10px] text-slate-400">{ms.number}</span></span>
+                                <span className="text-xs leading-snug">
+                                    <span className="block text-slate-700">{shortLib(ms.library)}</span>
+                                    <span className="block text-[10px] text-slate-400">{ms.number}</span>
+                                    {ms.edition && <span className="block text-[10px] text-indigo-500">{lang === 'en' ? `ed. ${ms.edition}` : `מהדורה: ${ms.edition}`}</span>}
+                                </span>
                             </label>
                         );
                     })}
@@ -4201,6 +4138,7 @@ function TextsTabV2({ textsData, textsAudit, orderData, lang, jumpStory }) {
                                                         <th key={r.key} onClick={() => setMsReadKey(r.key)} className={`px-2 py-2 text-right border-l border-slate-600 min-w-[230px] align-bottom cursor-pointer hover:bg-slate-700/40 ${msReadKey === r.key ? 'bg-slate-700/60' : ''}`}>
                                                             <div className="text-[11px] leading-tight">{shortLib(r.library)}</div>
                                                             <div className="text-[10px] text-slate-300 mt-0.5">{r.number}</div>
+                                                            {r.edition && <div className="text-[10px] text-amber-300 mt-0.5">{lang === 'en' ? `ed. ${r.edition}` : `מהדורה: ${r.edition}`}</div>}
                                                             <div className={`inline-block mt-1 text-[9px] rounded px-1.5 py-0.5 ${r.key === baseSynopsisKey ? 'bg-indigo-500 text-white' : profile.score > 0.82 ? 'bg-emerald-500 text-white' : profile.score > 0.62 ? 'bg-amber-500 text-white' : 'bg-rose-500 text-white'}`}>{r.key === baseSynopsisKey ? (lang === 'en' ? 'Base' : 'בסיס') : `${lang === 'en' ? 'Similarity' : 'דמיון'} ${Math.round(profile.score * 100)}%`}</div>
                                                         </th>
                                                     );
