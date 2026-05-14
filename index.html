@@ -396,13 +396,13 @@ function parseMss(resp) {
    so that orderData carries the canonical library/shelfmark identifiers.
 ═══════════════════════════════════════════════════════════ */
 function parseStoryListV2(resp, nameToMss = {}) {
-    if (!resp?.table?.rows) return [];
+    if (!resp?.table?.rows) return { orderData: [], allStories: [] };
     const cols = resp.table.cols || [];
     const rows = resp.table.rows || [];
     const MS_START = 5;  // ms columns start at index 5 (col F)
 
     // Need at least the two header rows (MS names + versions)
-    if (rows.length < 2) return [];
+    if (rows.length < 2) return { orderData: [], allStories: [] };
 
     // rows[0] = spreadsheet row 2: MS names in cols F-L
     const msNamesRow  = rows[0];
@@ -432,9 +432,10 @@ function parseStoryListV2(resp, nameToMss = {}) {
             version,
         });
     }
-    if (!msCols.length) return [];
+    if (!msCols.length) return { orderData: [], allStories: [] };
 
     const out = [];
+    const allStories = [];
     // Story data starts at rows[2] (spreadsheet row 4)
     for (let ri = 2; ri < rows.length; ri++) {
         const r = rows[ri];
@@ -445,6 +446,9 @@ function parseStoryListV2(resp, nameToMss = {}) {
 
         const storyName = cellStr(r, 1);        // Col B
         const note      = cellStr(r, 2);        // Col C
+
+        // Always record the canonical story entry (even if absent from all MSS)
+        allStories.push({ sarfattiNum, storyName, note });
 
         msCols.forEach(col => {
             const raw = cellStr(r, col.origIdx);
@@ -466,7 +470,7 @@ function parseStoryListV2(resp, nameToMss = {}) {
             });
         });
     }
-    return out;
+    return { orderData: out, allStories };
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -2396,7 +2400,7 @@ function ProximityMap({ mssData, workNames, orderData, lang }) {
    Cell value = position of that story in that specific MS
                (מספר סדר בכתב היד),  "·" = absent
 ═══════════════════════════════════════════════════════════ */
-function StoryOrderTab({ orderData, lang, onOpenTextStory, storiesWithFullText = [] }) {
+function StoryOrderTab({ orderData, allStories = [], lang, onOpenTextStory, storiesWithFullText = [] }) {
     const [search, setSearch] = useState('');
     const [sortKey, setSortKey] = useState('storyNum');
     const [sortDir, setSortDir] = useState('asc');
@@ -2413,7 +2417,7 @@ function StoryOrderTab({ orderData, lang, onOpenTextStory, storiesWithFullText =
             if (!r.library && !r.number) return;
             if (seen.has(key)) return;
             seen.add(key);
-            out.push({ key, library: r.library, number: r.number });
+            out.push({ key, library: r.library, number: r.number, msName: r.msName || '', version: r.version || '1' });
         });
         out.sort((a, b) => (a.library || '').localeCompare(b.library || '', 'he') || (a.number || '').localeCompare(b.number || '', 'he'));
         return out;
@@ -2440,10 +2444,21 @@ function StoryOrderTab({ orderData, lang, onOpenTextStory, storiesWithFullText =
     }, [orderData]);
 
     const canonStories = useMemo(() => {
+        if (allStories && allStories.length > 0) {
+            return allStories
+                .filter(s => s.sarfattiNum != null && s.sarfattiNum > 0)
+                .sort((a, b) => a.sarfattiNum - b.sarfattiNum)
+                .map(s => ({
+                    num: s.sarfattiNum,
+                    name: s.storyName || `${lang === 'en' ? 'Story' : 'סיפור'} ${s.sarfattiNum}`,
+                    note: s.note || '',
+                }));
+        }
+        // fallback: derive from orderData
         const nums = [...new Set(orderData.map(r => r.sarfattiNum).filter(n => n != null && n > 0))]
             .sort((a, b) => a - b);
-        return nums.map(num => ({ num, name: storyNameByNum[num] || `${lang === 'en' ? 'Story' : 'סיפור'} ${num}` }));
-    }, [orderData, storyNameByNum, lang]);
+        return nums.map(num => ({ num, name: storyNameByNum[num] || `${lang === 'en' ? 'Story' : 'סיפור'} ${num}`, note: '' }));
+    }, [allStories, orderData, storyNameByNum, lang]);
 
     const matrix = useMemo(() => {
         const m = {};
@@ -2550,6 +2565,7 @@ function StoryOrderTab({ orderData, lang, onOpenTextStory, storiesWithFullText =
             return {
                 num: st.num,
                 name: st.name,
+                note: st.note || '',
                 cellsByMs,
                 presentCount,
                 coverage,
@@ -2660,7 +2676,7 @@ function StoryOrderTab({ orderData, lang, onOpenTextStory, storiesWithFullText =
 
             <div className="overflow-auto flex-1 p-3 space-y-3">
                 <div className="rounded-xl border border-slate-200 overflow-auto bg-white">
-                    <table className="text-xs border-collapse" style={{ minWidth: `${Math.max(980, 420 + shownMs.length * 90)}px` }}>
+                    <table className="text-xs border-collapse" style={{ minWidth: `${Math.max(1150, 590 + shownMs.length * 90)}px` }}>
                         <thead className="sticky top-0 z-20 bg-slate-800 text-white">
                             <tr>
                                 <th className="px-2 py-2 text-center border-l border-slate-600 min-w-[52px] sticky right-0 z-30 bg-slate-900">
@@ -2673,12 +2689,15 @@ function StoryOrderTab({ orderData, lang, onOpenTextStory, storiesWithFullText =
                                         {lang === 'en' ? 'Sarfatti story name' : 'שם הסיפור אצל צרפתי'} {sortMark('storyName')}
                                     </button>
                                 </th>
-                                <th className="px-2 py-2 text-center border-l border-slate-600 min-w-[76px] sticky right-[282px] z-30 bg-slate-900">
+                                <th className="px-2 py-2 text-right border-l border-slate-600 min-w-[170px] sticky right-[282px] z-30 bg-slate-900">
+                                    {lang === 'en' ? 'Note' : 'הערה'}
+                                </th>
+                                <th className="px-2 py-2 text-center border-l border-slate-600 min-w-[76px] sticky right-[452px] z-30 bg-slate-900">
                                     <button onClick={() => toggleSort('coverage')} className="w-full text-center">
                                         {lang === 'en' ? 'Coverage' : 'כיסוי'} {sortMark('coverage')}
                                     </button>
                                 </th>
-                                <th className="px-2 py-2 text-center border-l border-slate-600 min-w-[76px] sticky right-[358px] z-30 bg-slate-900">
+                                <th className="px-2 py-2 text-center border-l border-slate-600 min-w-[76px] sticky right-[528px] z-30 bg-slate-900">
                                     <button onClick={() => toggleSort('avgAbsDelta')} className="w-full text-center">
                                         |Δ| {sortMark('avgAbsDelta')}
                                     </button>
@@ -2686,7 +2705,10 @@ function StoryOrderTab({ orderData, lang, onOpenTextStory, storiesWithFullText =
                                 {shownMs.map(ms => (
                                     <th key={`h-${ms.key}`} className="px-1.5 py-2 text-center border-l border-slate-600 min-w-[90px]">
                                         <button onClick={() => toggleSort(`ms:${ms.key}`)} className="w-full text-center">
-                                            <div className="text-[10px] leading-tight">{shortLib(ms.library)}</div>
+                                            <div className="text-[10px] leading-tight font-semibold">{ms.msName || shortLib(ms.library)}</div>
+                                            {ms.version && ms.version !== '1' && (
+                                                <div className="text-[9px] text-amber-300 mt-0.5">{lang === 'en' ? `ver. ${ms.version}` : `גרסה ${ms.version}`}</div>
+                                            )}
                                             <div className="text-[9px] text-slate-300 mt-0.5">{ms.number}</div>
                                             <div className="text-[10px] mt-0.5">{sortMark(`ms:${ms.key}`)}</div>
                                         </button>
@@ -2711,10 +2733,13 @@ function StoryOrderTab({ orderData, lang, onOpenTextStory, storiesWithFullText =
                                                 </button>
                                             )}
                                         </td>
-                                        <td className="px-2 py-1.5 text-center border-l border-slate-100 text-slate-600 sticky right-[282px] z-10 bg-white">
+                                        <td className="px-2 py-1.5 text-right heb border-l border-slate-100 text-slate-600 sticky right-[282px] z-10 bg-white text-[11px] leading-snug">
+                                            {row.note || ''}
+                                        </td>
+                                        <td className="px-2 py-1.5 text-center border-l border-slate-100 text-slate-600 sticky right-[452px] z-10 bg-white">
                                             {row.presentCount}/{shownMs.length}
                                         </td>
-                                        <td className="px-2 py-1.5 text-center border-l border-slate-100 text-slate-700 sticky right-[358px] z-10 bg-white">
+                                        <td className="px-2 py-1.5 text-center border-l border-slate-100 text-slate-700 sticky right-[528px] z-10 bg-white">
                                             {row.avgAbsDelta == null ? '·' : row.avgAbsDelta.toFixed(1)}
                                         </td>
                                         {shownMs.map(ms => {
@@ -2738,7 +2763,7 @@ function StoryOrderTab({ orderData, lang, onOpenTextStory, storiesWithFullText =
                             })}
                             {shownMs.length === 0 && (
                                 <tr>
-                                    <td colSpan={Math.max(4, 4 + shownMs.length)} className="px-3 py-4 text-center text-slate-400">
+                                    <td colSpan={Math.max(5, 5 + shownMs.length)} className="px-3 py-4 text-center text-slate-400">
                                         {lang === 'en' ? 'No manuscripts match the filter.' : 'אין כתבי יד התואמים את הסינון.'}
                                     </td>
                                 </tr>
@@ -4340,6 +4365,7 @@ const App = () => {
     const [workNames, setWorkNames] = useState([]);
     const [metaFields, setMetaFields] = useState([]);
     const [orderData, setOrderData] = useState([]);
+    const [allStories, setAllStories] = useState([]);
     const [textsData, setTextsData] = useState([]);
     const [textsAudit, setTextsAudit] = useState(null);
     const storiesWithFullText = useMemo(() => {
@@ -4384,8 +4410,10 @@ const App = () => {
             }
 
             if (r1.status === 'fulfilled') {
-                parsedOrder = parseStoryListV2(r1.value, parsedMss.nameToMss || {});
-                setOrderData(parsedOrder);
+                const parsed = parseStoryListV2(r1.value, parsedMss.nameToMss || {});
+                parsedOrder = parsed.orderData;
+                setOrderData(parsed.orderData);
+                setAllStories(parsed.allStories || []);
             } else {
                 errs.push(`סדר סיפורים: ${r1.reason?.message || 'שגיאה'}`);
             }
@@ -4526,6 +4554,7 @@ const App = () => {
                     {tab === 'order' && (
                         <StoryOrderTab
                             orderData={orderData}
+                            allStories={allStories}
                             lang={lang}
                             storiesWithFullText={storiesWithFullText}
                             onOpenTextStory={(storyNum) => {
